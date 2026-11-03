@@ -4,6 +4,7 @@
 #include "icon.h"
 
 #include <windows.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <wincodec.h>
 #include <wrl/client.h>
@@ -55,13 +56,65 @@ bool bufferSize(UINT width, UINT height, UINT& stride, UINT& bytes)
     return true;
 }
 
+HRESULT iconFileCanvas(IShellItem* item, IWICImagingFactory* wic, UINT& largest)
+{
+    largest = 0;
+    ComPtr<IExtractIconW> location;
+    constexpr IID extractIconIID = {0x000214fa, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+    HRESULT hr = item->BindToHandler(nullptr, BHID_SFUIObject,
+                                     extractIconIID,
+                                     reinterpret_cast<void**>(location.GetAddressOf()));
+    // Not every Shell handler exposes an underlying icon file. This is only
+    // source-canvas metadata; GetImage remains the sole pixel extractor.
+    if (hr == E_NOINTERFACE || hr == E_NOTIMPL || hr == MK_E_NOOBJECT)
+        return S_FALSE;
+    if (FAILED(hr)) return hr;
+    std::vector<wchar_t> filename(32768, L'\0');
+    int index = 0;
+    UINT flags = 0;
+    hr = location->GetIconLocation(0, filename.data(), static_cast<UINT>(filename.size()),
+                                  &index, &flags);
+    if (hr == S_FALSE || (SUCCEEDED(hr) && (flags & GIL_NOTFILENAME)))
+        return S_FALSE;
+    if (FAILED(hr)) return hr;
+    const DWORD needed = ExpandEnvironmentStringsW(filename.data(), nullptr, 0);
+    if (!needed) return HRESULT_FROM_WIN32(GetLastError());
+    std::vector<wchar_t> expanded(needed, L'\0');
+    const DWORD written = ExpandEnvironmentStringsW(filename.data(), expanded.data(), needed);
+    if (!written) return HRESULT_FROM_WIN32(GetLastError());
+    if (written > needed) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    const std::wstring path(expanded.data());
+    if (path.size() < 4 ||
+        CompareStringOrdinal(path.data() + path.size() - 4, 4, L".ico", 4, TRUE) != CSTR_EQUAL)
+        return S_FALSE;
+
+    ComPtr<IWICBitmapDecoder> decoder;
+    hr = wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                        WICDecodeMetadataCacheOnDemand,
+                                        decoder.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    UINT count = 0;
+    hr = decoder->GetFrameCount(&count);
+    if (FAILED(hr)) return hr;
+    for (UINT i = 0; i < count; ++i) {
+        ComPtr<IWICBitmapFrameDecode> frame;
+        hr = decoder->GetFrame(i, frame.GetAddressOf());
+        if (FAILED(hr)) return hr;
+        UINT width = 0, height = 0;
+        hr = frame->GetSize(&width, &height);
+        if (FAILED(hr)) return hr;
+        largest = std::max(largest, std::max(width, height));
+    }
+    return largest ? S_OK : WINCODEC_ERR_BADIMAGE;
+}
+
 Result encode(IWICImagingFactory* wic, HBITMAP handle, UINT size)
 {
     ComPtr<IWICBitmap> bitmap;
     // Shell image-factory output uses straight alpha, not PBGRA. In particular,
     // do not infer premultiplication from bmBitsPixel, or unpremultiply twice.
-    // Microsoft's PowerToys ShellItemImageFactoryIconExtractor uses the same
-    // straight-alpha interpretation (commit 6061fcaeef2430a3d52e056468c9ecf9dbde953f).
+    // Controlled native Windows ICO/folder fixtures verify RGBA (191,95,31,128)
+    // for source (192,96,32,128), not the premultiplied (96,48,16,128).
     // ISharedBitmap::GetFormat only reports
     // alpha presence; InitializeBitmap(UNKNOWN) adds no provenance information.
     HRESULT hr = wic->CreateBitmapFromHBITMAP(handle, nullptr, WICBitmapUseAlpha,
@@ -199,6 +252,26 @@ Result extract(const std::u16string& path, std::int32_t size, Kind kind)
     hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                           IID_PPV_ARGS(wic.GetAddressOf()));
     if (FAILED(hr)) return failure("Create WIC imaging factory", hr);
+    ComPtr<IShellItem> item;
+    hr = imageFactory.As(&item);
+    if (FAILED(hr)) return failure("Query Shell item", hr);
+    UINT nativeCanvas = 0;
+    hr = iconFileCanvas(item.Get(), wic.Get(), nativeCanvas);
+    if (FAILED(hr)) return failure("Read Shell icon file canvas", hr);
+    if (nativeCanvas && nativeCanvas < static_cast<UINT>(size)) {
+        // On Windows, SCALEUP can return an oversized, partly uninitialized
+        // bitmap for a legacy ICO. Re-extract at its real resource canvas size
+        // and let WIC scale the whole canvas, including intentional margins.
+        // Never derive that canvas from the nontransparent bounding box.
+        raw = nullptr;
+        hr = imageFactory->GetImage(SIZE{static_cast<LONG>(nativeCanvas),
+                                        static_cast<LONG>(nativeCanvas)},
+            static_cast<SIIGBF>(SIIGBF_ICONONLY | SIIGBF_SCALEUP), &raw);
+        Bitmap native(raw);
+        if (FAILED(hr)) return failure("GetImage at native icon canvas size", hr);
+        if (!native) return {{}, "Shell returned a null native icon bitmap"};
+        bitmap = std::move(native);
+    }
     return encode(wic.Get(), bitmap.get(), static_cast<UINT>(size));
 }
 } // namespace
