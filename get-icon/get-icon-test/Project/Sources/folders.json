@@ -1,0 +1,6 @@
+{
+    "Tests": {
+        "methods": ["test_all", "test_icons"]
+    },
+    "trash": {}
+}
