@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -15,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 
@@ -129,6 +131,52 @@ struct Image {
     std::vector<unsigned char> rgba;
 };
 
+void diagnoseShellBitmap(const fs::path& path, int size, const char* label)
+{
+    ComPtr<IShellItemImageFactory> shell;
+    check(SHCreateItemFromParsingName(path.c_str(), nullptr,
+          IID_PPV_ARGS(shell.GetAddressOf())), "Diagnostic shell factory");
+    HBITMAP raw = nullptr;
+    check(shell->GetImage(SIZE{size, size},
+          static_cast<SIIGBF>(SIIGBF_ICONONLY | SIIGBF_SCALEUP), &raw),
+          "Diagnostic GetImage");
+    auto deleter = [](HBITMAP value) { DeleteObject(value); };
+    std::unique_ptr<std::remove_pointer_t<HBITMAP>, decltype(deleter)> owned(raw, deleter);
+    DIBSECTION dib{};
+    const int objectBytes = GetObjectW(raw, sizeof(dib), &dib);
+    std::cout << "SHELL " << label << " request=" << size
+              << " GetObject=" << objectBytes
+              << " dimensions=" << dib.dsBm.bmWidth << 'x' << dib.dsBm.bmHeight
+              << " bitCount=" << dib.dsBm.bmBitsPixel
+              << " dibHeight=" << dib.dsBmih.biHeight << '\n';
+    ComPtr<IWICImagingFactory> wic;
+    check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+          IID_PPV_ARGS(wic.GetAddressOf())), "Diagnostic WIC factory");
+    for (auto option : {WICBitmapUseAlpha, WICBitmapUsePremultipliedAlpha}) {
+        ComPtr<IWICBitmap> bitmap;
+        check(wic->CreateBitmapFromHBITMAP(raw, nullptr, option, bitmap.GetAddressOf()),
+              "Diagnostic import HBITMAP");
+        UINT width = 0, height = 0;
+        check(bitmap->GetSize(&width, &height), "Diagnostic bitmap dimensions");
+        ComPtr<IWICFormatConverter> converter;
+        check(wic->CreateFormatConverter(converter.GetAddressOf()), "Diagnostic converter");
+        check(converter->Initialize(bitmap.Get(), GUID_WICPixelFormat32bppRGBA,
+              WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom),
+              "Diagnostic straight RGBA conversion");
+        std::vector<unsigned char> pixels(static_cast<std::size_t>(width) * height * 4);
+        check(converter->CopyPixels(nullptr, width * 4,
+              static_cast<UINT>(pixels.size()), pixels.data()), "Diagnostic CopyPixels");
+        std::cout << "  import=" << int(option) << " RGBA:";
+        for (auto x : {width / 8, width * 3 / 8, width * 5 / 8}) {
+            const auto offset = (static_cast<std::size_t>(height / 2) * width + x) * 4;
+            std::cout << " (" << int(pixels[offset]) << ',' << int(pixels[offset + 1])
+                      << ',' << int(pixels[offset + 2]) << ',' << int(pixels[offset + 3])
+                      << ')';
+        }
+        std::cout << '\n';
+    }
+}
+
 Image decode(const icons::Result& result)
 {
     require(static_cast<bool>(result), result.error.c_str());
@@ -199,6 +247,9 @@ void checkFixture(const Image& image)
     const UINT size = image.width;
     const auto* partial = image.rgba.data() +
         (static_cast<std::size_t>(size / 2) * size + size * 5 / 8) * 4;
+    std::cout << "PNG fixture " << size << " RGBA=(" << int(partial[0]) << ','
+              << int(partial[1]) << ',' << int(partial[2]) << ',' << int(partial[3])
+              << ")\n";
     require(std::abs(int(partial[0]) - 192) <= 6 &&
                 std::abs(int(partial[1]) - 96) <= 6 &&
                 std::abs(int(partial[2]) - 32) <= 6 &&
@@ -288,7 +339,6 @@ void run()
     const auto icon = fixtures.root / L"\u900f\u660e-32.ico";
     const auto custom = fixtures.root / L"\u30ab\u30b9\u30bf\u30e0";
     write(icon, legacyIcon());
-    checkFixture(load(icon, 32, icons::Kind::file));
     require(fs::create_directory(custom), "Create custom folder failed");
     std::wstring iconPath = icon.wstring();
     SHFOLDERCUSTOMSETTINGS settings{};
@@ -303,6 +353,11 @@ void run()
             "Set custom folder read-only attribute failed");
     require(fs::exists(custom / L"desktop.ini"), "Shell did not create desktop.ini");
     SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, custom.c_str(), nullptr);
+    diagnoseShellBitmap(icon, 32, "ICO");
+    diagnoseShellBitmap(custom, 32, "folder");
+    diagnoseShellBitmap(custom, 256, "folder");
+    diagnoseShellBitmap(custom, 257, "folder");
+    checkFixture(load(icon, 32, icons::Kind::file));
     checkFixture(load(custom, 32, icons::Kind::folder));
     checkFixture(load(custom, 256, icons::Kind::folder));
     checkFixture(load(custom, 257, icons::Kind::folder));
