@@ -39,6 +39,12 @@ CERT_PATH="$SIGNING_TEMP/certificate.p12"
 
 cleanup() {
     status=$?
+    if [[ -f "$SIGNING_TEMP/search-list" ]]; then
+        if ! python3 scripts/release_checks.py keychain-search-list --snapshot "$SIGNING_TEMP/search-list"; then
+            echo "Could not restore the original user keychain search list" >&2
+            status=1
+        fi
+    fi
     if [[ -f "$KEYCHAIN_PATH" ]]; then
         if ! security delete-keychain "$KEYCHAIN_PATH"; then
             echo "Could not delete temporary signing keychain" >&2
@@ -46,7 +52,7 @@ cleanup() {
         fi
     fi
     rm -f "$CERT_PATH" "$SIGNING_TEMP/identities" "$SIGNING_TEMP/identity" \
-        "$SIGNING_TEMP/bundle-signature" "$SIGNING_TEMP/dmg-signature"
+        "$SIGNING_TEMP/bundle-signature" "$SIGNING_TEMP/dmg-signature" "$SIGNING_TEMP/search-list"
     if ! rmdir "$SIGNING_TEMP"; then
         echo "Could not remove temporary signing directory" >&2
         status=1
@@ -62,6 +68,8 @@ printf '%s' "$APPLE_DEVELOPER_ID_CERTIFICATE" | base64 --decode -o "$CERT_PATH"
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+python3 scripts/release_checks.py keychain-search-list \
+    --snapshot "$SIGNING_TEMP/search-list" --add "$KEYCHAIN_PATH"
 security import "$CERT_PATH" -P "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD" \
     -t cert -f pkcs12 -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s \

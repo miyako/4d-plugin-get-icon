@@ -5,6 +5,20 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
+import subprocess
+
+
+def keychain_search_list(snapshot, keychain=None):
+    if keychain is not None:
+        original = subprocess.check_output(
+            ["security", "list-keychains", "-d", "user"], text=True
+        )
+        snapshot.write_text(original, encoding="utf-8")
+        paths = [str(keychain), *shlex.split(original)]
+    else:
+        paths = shlex.split(snapshot.read_text(encoding="utf-8"))
+    subprocess.run(["security", "list-keychains", "-d", "user", "-s", *paths], check=True)
 
 
 def signature(details, team, runtime=False):
@@ -53,13 +67,18 @@ def main():
     check_notary.add_argument("--report", type=Path, required=True)
     sums = commands.add_parser("checksums")
     sums.add_argument("--directory", type=Path, required=True)
+    keychains = commands.add_parser("keychain-search-list")
+    keychains.add_argument("--snapshot", type=Path, required=True)
+    keychains.add_argument("--add", type=Path)
     args = parser.parse_args()
     if args.command == "signature":
         signature(args.details.read_text(encoding="utf-8"), args.team, args.runtime)
     elif args.command == "notarization":
         notarization(json.loads(args.report.read_text(encoding="utf-8")))
-    else:
+    elif args.command == "checksums":
         checksums(args.directory)
+    else:
+        keychain_search_list(args.snapshot, args.add)
 
 
 if __name__ == "__main__":
