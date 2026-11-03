@@ -5,8 +5,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-from release_checks import checksums, notarization, signature
+from release_checks import checksums, keychain_search_list, notarization, signature
 
 
 TEAM = "AB12345678"
@@ -21,6 +22,34 @@ DETAILS = (
 
 
 class ReleaseChecks(unittest.TestCase):
+    def test_keychain_search_list_round_trip_preserves_quoted_paths(self):
+        original = '    "/Users/runner/Library/Keychains/login.keychain-db"\n    "/tmp/with spaces/shared.keychain-db"\n'
+        with tempfile.TemporaryDirectory() as temp:
+            snapshot = Path(temp) / "search-list"
+            signing = Path(temp) / "signing.keychain-db"
+            with mock.patch("release_checks.subprocess.check_output", return_value=original), \
+                    mock.patch("release_checks.subprocess.run") as run:
+                keychain_search_list(snapshot, signing)
+                self.assertEqual(snapshot.read_text(), original)
+                keychain_search_list(snapshot)
+            existing = ["/Users/runner/Library/Keychains/login.keychain-db",
+                        "/tmp/with spaces/shared.keychain-db"]
+            prefix = ["security", "list-keychains", "-d", "user", "-s"]
+            self.assertEqual(run.call_args_list, [
+                mock.call([*prefix, str(signing), *existing], check=True),
+                mock.call([*prefix, *existing], check=True),
+            ])
+
+    def test_keychain_search_list_failure_keeps_restorable_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            snapshot = Path(temp) / "search-list"
+            with mock.patch("release_checks.subprocess.check_output", return_value='"/tmp/login"\n'), \
+                    mock.patch("release_checks.subprocess.run",
+                               side_effect=subprocess.CalledProcessError(1, "security")):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    keychain_search_list(snapshot, Path(temp) / "signing")
+            self.assertEqual(snapshot.read_text(), '"/tmp/login"\n')
+
     def test_developer_id_with_runtime(self):
         signature(DETAILS, TEAM, runtime=True)
 
