@@ -79,6 +79,7 @@ jobs:
           New-Item -ItemType Directory -Force get-icon/get-icon-test/Resources | Out-Null
           $runtime = Get-ChildItem .local-tools -Filter tool4d.exe -Recurse | Select-Object -First 1
           if (!$runtime) { throw "tool4d.exe not found" }
-          $output = & $runtime.FullName --dataless --startup-method=test_all "--project=$((Get-Location).Path)/get-icon/get-icon-test/Project/get-icon.4DProject" 2>&1
+          $project = (Resolve-Path get-icon/get-icon-test/Project/get-icon.4DProject).Path
+          $output = & $runtime.FullName --dataless --startup-method=test_all "--project=$project" 2>&1
           $output | Write-Output
           if ($LASTEXITCODE -ne 0 -or !($output -cmatch '^PASS$')) { throw "4D integration failed" }
