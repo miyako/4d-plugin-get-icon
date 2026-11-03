@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(get-icon VERSION 1.0.0 LANGUAGES C CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" PLUGIN_VERSION LIMIT_COUNT 1)
+project(get-icon VERSION "${PLUGIN_VERSION}" LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 17)
@@ -23,6 +24,8 @@ if(APPLE)
     set_target_properties(get-icon PROPERTIES
         BUNDLE TRUE BUNDLE_EXTENSION bundle
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         LIBRARY_OUTPUT_DIRECTORY "${TEST_PLUGINS}")
     target_link_libraries(get-icon PRIVATE "-framework CoreGraphics")
     set_source_files_properties("${SDK_DIR}/4DPluginAPI.c" PROPERTIES

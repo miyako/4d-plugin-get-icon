@@ -23,6 +23,7 @@ static NSBitmapImageRep* decode(const icons::Result& result, int size) {
     require(bool(result), "Expected encoded PNG");
     const unsigned char signature[] = {137, 80, 78, 71, 13, 10, 26, 10};
     require(result.png.size() > 26 && !memcmp(signature, result.png.data(), 8), "Not PNG");
+    require(result.png[24] == 8 && result.png[25] == 6, "PNG must carry 8-bit RGBA");
     NSBitmapImageRep* bitmap = [[NSBitmapImageRep alloc] initWithData:
         [NSData dataWithBytes:result.png.data() length:result.png.size()]];
     require(bitmap && bitmap.pixelsWide == size && bitmap.pixelsHigh == size, "Wrong pixel dimensions");

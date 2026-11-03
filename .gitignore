@@ -2,7 +2,7 @@
 *.vcxproj.user
 .DS_Store
 .local-tools/
-get-icon/build/
+get-icon/build*/
 get-icon/get-icon-test/Data/
 get-icon/get-icon-test/Project/DerivedData/
 get-icon/get-icon-test/userPreferences.*

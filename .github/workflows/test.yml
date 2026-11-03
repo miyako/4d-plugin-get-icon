@@ -33,10 +33,12 @@ jobs:
         if: runner.os == 'Windows'
         run: cmake -S get-icon -B get-icon/build -A x64
       - name: Build
+        id: build
         run: cmake --build get-icon/build --config Release --parallel
       - name: Native tests
         run: ctest --test-dir get-icon/build -C Release --output-on-failure
       - name: Resolve test runtime version
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         id: version
         shell: bash
         run: |
@@ -47,6 +49,8 @@ jobs:
           echo "branch=$major.x" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Download tool4d
+        if: ${{ !cancelled() && steps.version.outcome == 'success' }}
+        id: download
         shell: bash
         env:
           BRANCH: ${{ steps.version.outputs.branch }}
@@ -60,7 +64,7 @@ jobs:
             -o .local-tools/tool4d.tar.xz
           tar xJf .local-tools/tool4d.tar.xz -C .local-tools
       - name: 4D integration (macOS)
-        if: runner.os == 'macOS'
+        if: ${{ !cancelled() && runner.os == 'macOS' && steps.download.outcome == 'success' }}
         shell: bash
         run: |
           mkdir -p get-icon/get-icon-test/Resources
@@ -69,7 +73,7 @@ jobs:
             --project="$PWD/get-icon/get-icon-test/Project/get-icon.4DProject" 2>&1 | tee .local-tools/test.log
           grep -qx PASS .local-tools/test.log
       - name: 4D integration (Windows)
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.download.outcome == 'success' }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force get-icon/get-icon-test/Resources | Out-Null

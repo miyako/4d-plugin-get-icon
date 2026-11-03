@@ -36,7 +36,14 @@ bool readPath(PA_ObjectRef object, const char16_t* name, std::u16string& path) {
 }
 
 bool objectPath(PA_ObjectRef object, icons::Kind kind, std::u16string& path) {
-    if (!object || !readPath(object, u"platformPath", path))
+    if (!object)
+        return false;
+    Key kindKey(kind == icons::Kind::file ? u"isFile" : u"isFolder");
+    Variable objectKind(PA_GetObjectProperty(object, &kindKey.value));
+    if (PA_GetLastError() != eER_NoErr ||
+        PA_GetVariableKind(objectKind.value) != eVK_Boolean ||
+        !PA_GetBooleanVariable(objectKind.value) ||
+        !readPath(object, u"platformPath", path))
         return false;
     Variable argument(PA_CreateVariable(eVK_Unistring));
     Key ownedPath(path.c_str());
