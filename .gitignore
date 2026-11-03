@@ -8,3 +8,6 @@ get-icon/get-icon-test/Project/DerivedData/
 get-icon/get-icon-test/userPreferences.*
 get-icon/get-icon-test/Plugins/
 get-icon/get-icon-test/Resources/icon-test-*.txt
+.package-inputs/
+.signed-distribution/
+scripts/__pycache__/
