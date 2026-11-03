@@ -174,7 +174,25 @@ void diagnoseShellBitmap(const fs::path& path, int size, const char* label)
                       << ',' << int(pixels[offset + 2]) << ',' << int(pixels[offset + 3])
                       << ')';
         }
-        std::cout << '\n';
+        UINT left = width, top = height, right = 0, bottom = 0;
+        bool partialFound = false;
+        for (UINT y = 0; y < height; ++y)
+            for (UINT x = 0; x < width; ++x) {
+                const auto offset = (static_cast<std::size_t>(y) * width + x) * 4;
+                if (pixels[offset + 3]) {
+                    left = std::min(left, x); right = std::max(right, x);
+                    top = std::min(top, y); bottom = std::max(bottom, y);
+                }
+                if (!partialFound && pixels[offset + 3] && pixels[offset + 3] != 255) {
+                    partialFound = true;
+                    std::cout << " firstPartial@" << x << ',' << y << "=("
+                              << int(pixels[offset]) << ',' << int(pixels[offset + 1])
+                              << ',' << int(pixels[offset + 2]) << ','
+                              << int(pixels[offset + 3]) << ')';
+                }
+            }
+        std::cout << " alphaBounds=" << left << ',' << top << '-' << right << ','
+                  << bottom << '\n';
     }
 }
 
@@ -395,8 +413,14 @@ void run()
             "Set explicit custom folder attributes failed");
     SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, explicitCustom.c_str(), nullptr);
     diagnoseShellBitmap(explicitCustom, 32, "explicit folder");
+    diagnoseShellBitmap(explicitCustom, 16, "explicit folder");
+    diagnoseShellBitmap(explicitCustom, 31, "explicit folder");
+    diagnoseShellBitmap(explicitCustom, 48, "explicit folder");
+    diagnoseShellBitmap(explicitCustom, 64, "explicit folder");
+    diagnoseShellBitmap(explicitCustom, 128, "explicit folder");
     diagnoseShellBitmap(explicitCustom, 256, "explicit folder");
     diagnoseShellBitmap(explicitCustom, 257, "explicit folder");
+    diagnoseShellBitmap(icon, 256, "ICO");
     checkFixture(load(explicitCustom, 32, icons::Kind::folder));
     checkFixture(load(explicitCustom, 256, icons::Kind::folder));
     checkFixture(load(explicitCustom, 257, icons::Kind::folder));
