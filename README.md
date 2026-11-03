@@ -78,7 +78,9 @@ Run the integration suite with a matching [tool4d](https://developer.4d.com/docs
   --project="$PWD/get-icon/get-icon-test/Project/get-icon.4DProject"
 ```
 
-Require both a successful exit and an exact `PASS` output line: tool4d can exit zero after a language error. `.github/workflows/test.yml` builds and runs native/4D tests on macOS and Windows for pushes, pull requests, and manual dispatch. There is no release/publishing workflow.
+Require both a successful exit and an exact `PASS` output line: tool4d can exit zero after a language error. The integration suite also checks extraction from another cooperative 4D process. `.github/workflows/test.yml` builds and runs native/4D tests on macOS and Windows for pushes, pull requests, and manual dispatch.
+
+**No repository secrets are required.** Checkout uses GitHub's automatic `GITHUB_TOKEN` with read-only contents access; tool4d downloads publicly and needs no license activation. No PAT, GitHub App, signing certificate, or notarization credentials are needed. There is no release/publishing workflow.
 
 ## References and license
 

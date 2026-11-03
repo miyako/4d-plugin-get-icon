@@ -1,15 +1,23 @@
 #include "icon.h"
 #import <AppKit/AppKit.h>
 #include <cstdio>
-#include <cstdlib>
+#include <stdexcept>
 #include <thread>
 
 static void require(bool condition, const char* message) {
     if (!condition) {
-        std::fprintf(stderr, "%s\n", message);
-        std::exit(1);
+        throw std::runtime_error(message);
     }
 }
+
+struct FixtureDirectory {
+    NSString* path = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    ~FixtureDirectory() {
+        NSFileManager* fm = NSFileManager.defaultManager;
+        if ([fm fileExistsAtPath:path] && ![fm removeItemAtPath:path error:nil])
+            std::fprintf(stderr, "Cannot clean native test fixture directory\n");
+    }
+};
 
 static std::u16string nativePath(NSString* path) {
     std::u16string result(path.length, u'\0');
@@ -44,10 +52,11 @@ static std::vector<unsigned char> raster(CGImageRef image) {
     return rgba;
 }
 
-int main() {
+int main() try {
     @autoreleasepool {
         [NSApplication sharedApplication];
-        NSString* root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+        FixtureDirectory fixture;
+        NSString* root = fixture.path;
         NSFileManager* fm = NSFileManager.defaultManager;
         require([fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil],
                 "Cannot create fixture directory");
@@ -119,4 +128,8 @@ int main() {
         require([fm removeItemAtPath:root error:nil], "Cannot clean fixtures");
         std::puts("PASS: native dimensions, alpha, Unicode, custom 32px icons, failures, repeated calls");
     }
+    return 0;
+} catch (const std::exception& error) {
+    std::fprintf(stderr, "%s\n", error.what());
+    return 1;
 }

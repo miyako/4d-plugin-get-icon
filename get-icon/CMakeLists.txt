@@ -27,6 +27,10 @@ if(APPLE)
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         LIBRARY_OUTPUT_DIRECTORY "${TEST_PLUGINS}")
+    foreach(CONFIG DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        set_target_properties(get-icon PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY_${CONFIG} "${TEST_PLUGINS}")
+    endforeach()
     target_link_libraries(get-icon PRIVATE "-framework CoreGraphics")
     set_source_files_properties("${SDK_DIR}/4DPluginAPI.c" PROPERTIES
         COMPILE_OPTIONS "-Wno-multichar;-Wno-int-conversion")
@@ -36,6 +40,7 @@ elseif(WIN32)
     target_link_libraries(icon-native PUBLIC shell32 ole32 windowscodecs gdi32)
     add_library(get-icon SHARED ${PLUGIN_SOURCES})
     set_target_properties(get-icon PROPERTIES SUFFIX ".4DX"
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_PLUGINS}/get-icon/Contents/Windows64"
         LINK_FLAGS "/DEF:\"${SDK_DIR}/4DPluginAPI.def\"")
     foreach(CONFIG DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
         set_target_properties(get-icon PROPERTIES

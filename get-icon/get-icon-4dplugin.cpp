@@ -99,7 +99,7 @@ void getIcon(PA_PluginParameters params, icons::Kind kind) {
         } else if (!objectPath(PA_GetObjectParameter(params, 1), kind, path)) {
             result.error = "Cannot resolve the object's native path";
         } else {
-            Request request{path, size, kind, {}};
+            Request request{path, size, kind, {{}, "Native icon extraction did not run"}};
 #ifdef __APPLE__
             // Ask 4D to switch context, never synchronously dispatch onto Cocoa.
             PA_RunInMainProcess(nativeLoad, &request);
