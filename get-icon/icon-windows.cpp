@@ -48,8 +48,10 @@ using Bitmap = std::unique_ptr<std::remove_pointer_t<HBITMAP>, DeleteBitmap>;
 
 bool bufferSize(UINT width, UINT height, UINT& stride, UINT& bytes)
 {
+    // WIC raw buffer lengths are UINT. Only the encoded PNG crosses the SDK's
+    // signed 32-bit length boundary; do not apply that limit to raw pixels.
     const auto count = static_cast<std::uint64_t>(width) * height;
-    if (!width || !height || count > static_cast<UINT>(INT32_MAX) / 4)
+    if (!width || !height || count > std::numeric_limits<UINT>::max() / 4)
         return false;
     stride = width * 4;
     bytes = static_cast<UINT>(count * 4);
@@ -138,7 +140,7 @@ Result encode(IWICImagingFactory* wic, HBITMAP handle, UINT size)
     hr = bitmap->GetSize(&width, &height);
     if (FAILED(hr)) return failure("Bitmap GetSize", hr);
     if (!bufferSize(width, height, sourceStride, sourceBytes))
-        return {{}, "Shell bitmap dimensions exceed signed 32-bit buffer limits"};
+        return {{}, "Shell bitmap dimensions exceed WIC UINT buffer limits"};
 
     // Resample premultiplied colors, then convert back to straight PNG colors.
     // Scale the complete canvas, not the nontransparent bounding box: padding
@@ -179,7 +181,7 @@ Result encode(IWICImagingFactory* wic, HBITMAP handle, UINT size)
     UINT stride = 0, bytes = 0, fitStride = 0, fitBytes = 0;
     if (!bufferSize(size, size, stride, bytes) ||
         !bufferSize(fitWidth, fitHeight, fitStride, fitBytes))
-        return {{}, "Output dimensions exceed signed 32-bit buffer limits"};
+        return {{}, "Output dimensions exceed WIC UINT buffer limits"};
     std::vector<unsigned char> canvas(bytes, 0), pixels(fitBytes);
     hr = straight->CopyPixels(nullptr, fitStride, fitBytes, pixels.data());
     if (FAILED(hr)) return failure("CopyPixels", hr);

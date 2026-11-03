@@ -166,7 +166,7 @@ Image decode(const icons::Result& result)
     Image image;
     check(frame->GetSize(&image.width, &image.height), "Get decoded size");
     require(image.width > 0 && image.height > 0 &&
-                static_cast<std::uint64_t>(image.width) * image.height <= INT32_MAX / 4,
+                static_cast<std::uint64_t>(image.width) * image.height <= UINT32_MAX / 4,
             "Invalid decoded dimensions");
     WICPixelFormatGUID nativeFormat{};
     check(frame->GetPixelFormat(&nativeFormat), "Get PNG pixel format");
@@ -289,9 +289,11 @@ void run()
     write(file, {'t', 'e', 's', 't'});
     require(fs::create_directory(folder), "Create Unicode folder failed");
 
+    // Check representability only; do not allocate near-limit pixel buffers.
     require(!icons::validSize(-1) && !icons::validSize(0) &&
-                icons::validSize(1) && icons::validSize(23170) &&
-                !icons::validSize(23171) && !icons::validSize(INT32_MAX),
+                icons::validSize(1) && icons::validSize(23171) &&
+                icons::validSize(32767) && !icons::validSize(32768) &&
+                !icons::validSize(INT32_MAX),
             "Size arithmetic boundary validation failed");
     for (int size : {1, 17, 31, 32, 63, 255, 256, 257}) {
         load(file, size, icons::Kind::file);
@@ -305,7 +307,7 @@ void run()
     reject(file.u16string() + std::u16string(u"\0suffix", 7), 256, icons::Kind::file);
     reject(file.u16string(), 0, icons::Kind::file);
     reject(file.u16string(), -1, icons::Kind::file);
-    reject(file.u16string(), 23171, icons::Kind::file);
+    reject(file.u16string(), 32768, icons::Kind::file);
     reject(file.u16string(), INT32_MAX, icons::Kind::file);
     reject(file.u16string(), 256, static_cast<icons::Kind>(99));
 
