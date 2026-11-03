@@ -1,0 +1,84 @@
+name: Signed release packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-packages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require an explicit dispatch from main
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] || [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::Signed packages must be dispatched from main."
+            exit 1
+          fi
+  build:
+    needs: authorize
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/test.yml
+  sign-package:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-macos
+          path: .package-inputs/macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-windows
+          path: .package-inputs/windows
+      - name: Assemble verified source-bound inputs
+        run: python3 scripts/package.py assemble --inputs .package-inputs --output "$RUNNER_TEMP/get-icon-package"
+      - name: Developer ID sign, notarize, and package
+        id: sign
+        env:
+          APPLE_DEVELOPER_ID_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE }}
+          APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          NOTARYTOOL_APPLE_ID: ${{ secrets.NOTARYTOOL_APPLE_ID }}
+          NOTARYTOOL_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+          NOTARYTOOL_PASSWORD: ${{ secrets.NOTARYTOOL_PASSWORD }}
+        run: bash scripts/sign-package.sh "$RUNNER_TEMP/get-icon-package/payload" "$RUNNER_TEMP/get-icon-distribution"
+      - name: Retain notarization failure diagnostics
+        if: failure() && steps.sign.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: notarization-failure-${{ github.sha }}
+          path: ${{ runner.temp }}/get-icon-distribution/*-notarization*.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Verify final archived bytes and install for smoke testing
+        run: |
+          VERSION=$(cat VERSION)
+          cd "$RUNNER_TEMP/get-icon-distribution"
+          shasum -a 256 -c SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          ditto -x -k "$RUNNER_TEMP/get-icon-distribution/get-icon-$VERSION.zip" "$RUNNER_TEMP/get-icon-extracted"
+          python3 scripts/package.py verify --payload "$RUNNER_TEMP/get-icon-extracted" --manifest "$RUNNER_TEMP/get-icon-extracted/PROVENANCE.json"
+          codesign --verify --strict "$RUNNER_TEMP/get-icon-extracted/get-icon.bundle"
+          mkdir -p get-icon/get-icon-test/Plugins
+          ditto "$RUNNER_TEMP/get-icon-extracted/get-icon.bundle" get-icon/get-icon-test/Plugins/get-icon.bundle
+      - name: Smoke test the signed packaged plugin
+        uses: ./.github/actions/tool4d-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: get-icon-signed-packages-${{ github.sha }}
+          path: ${{ runner.temp }}/get-icon-distribution/
+          if-no-files-found: error
+          retention-days: 14

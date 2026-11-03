@@ -82,7 +82,51 @@ Run the integration suite with a matching [tool4d](https://developer.4d.com/docs
 
 Require both a successful exit and an exact `PASS` output line: tool4d can exit zero after a language error. The integration suite also checks extraction from another cooperative 4D process. `.github/workflows/test.yml` builds and runs native/4D tests on macOS and Windows for pushes, pull requests, and manual dispatch.
 
-**No repository secrets are required.** Checkout uses GitHub's automatic `GITHUB_TOKEN` with read-only contents access; tool4d downloads publicly and needs no license activation. No PAT, GitHub App, signing certificate, or notarization credentials are needed. There is no release/publishing workflow.
+**Normal builds and PR tests require no custom secrets.** Checkout uses GitHub's automatic `GITHUB_TOKEN` with read-only contents access; tool4d downloads publicly and needs no license activation. CI also stages the tested native binaries, checks their source-bound manifests, and validates the real same-run macOS/Windows artifact handoff. These short-lived build inputs are not signed distribution packages.
+
+## Signed distribution packages
+
+`.github/workflows/release.yml` adds **macOS Developer ID Application signing and Apple notarization**. Windows Authenticode signing is intentionally not implemented: the included Windows `.4DX` remains unsigned.
+
+Run **Signed release packages** manually in GitHub Actions, choosing **main**. Other refs are rejected by the production job and signing script. The dispatch's immutable commit is used for both platforms, the existing native/tool4d tests, input manifests, and packaging. This workflow does not bump versions, create/push tags, merge code, or publish a GitHub Release. It uploads Actions artifacts only. `VERSION` remains the single version source; repeated dispatches are distinguished by their commit and Actions run.
+
+The workflow builds a universal macOS binary and Windows x64 binary, verifies their hashes, versions and source/SDK commits, and assembles one portable plugin:
+
+```text
+get-icon.bundle/
+  Contents/
+    Info.plist
+    MacOS/get-icon
+    Windows64/get-icon.4DX
+    Resources/manifest.json
+```
+
+The bundle is Developer ID signed with hardened runtime and a secure timestamp. Signing identity and the resulting signature must match `NOTARYTOOL_TEAM_ID`. Verification, missing credentials, a signing error, or any notarization status other than **Accepted** fails the workflow; there is no ad-hoc or unsigned production fallback. The DMG container is separately signed and notarized, then stapled, validated, and assessed by Gatekeeper. The ZIP is notarized but cannot itself carry a stapled ticket; use the DMG for a stapled download.
+
+After both formats pass, the ZIP is extracted, its final inventory and signature are verified, and the actual packaged plugin runs through tool4d before artifacts upload. Download `get-icon-signed-packages-<commit>` from the successful run. It contains the ZIP, DMG, notarization reports, `PROVENANCE.json`, and `SHA256SUMS`. The package includes plugin/SDK licenses and `BUILD-PROVENANCE.json` with explicitly pre-sign native hashes; `PROVENANCE.json` inventories the signed payload, while `SHA256SUMS` hashes the final archives **after signing and DMG stapling**:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+xcrun stapler validate get-icon-1.0.0.dmg
+spctl --assess --type open --context context:primary-signature get-icon-1.0.0.dmg
+```
+
+### Required signing secrets
+
+Use the same six names as the supplied migration-plugin workflow. Configure them under **Settings > Secrets and variables > Actions** (repository secrets), or as secrets of the **release-signing** environment:
+
+| Secret | Purpose and setup |
+|---|---|
+| `APPLE_DEVELOPER_ID_CERTIFICATE` | Export a **Developer ID Application** certificate together with its private key from macOS Keychain Access as `.p12`; encode with `base64 -i certificate.p12 \| pbcopy` and paste the encoded value. An Apple Development certificate is not sufficient. |
+| `APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD` | Password chosen when exporting that `.p12`. |
+| `KEYCHAIN_PASSWORD` | A new strong random password used only for the temporary CI keychain. |
+| `NOTARYTOOL_APPLE_ID` | Apple ID email authorized for the Apple Developer team. |
+| `NOTARYTOOL_TEAM_ID` | The team's 10-character ID, available in the Apple Developer account's Membership details. It must match the signing certificate's team. |
+| `NOTARYTOOL_PASSWORD` | An app-specific password created at [account.apple.com](https://account.apple.com/) under **Sign-In and Security > App-Specific Passwords**. |
+
+No PAT, GitHub App credentials, Windows certificate, or additional 4D license is needed. The workflow uses a temporary keychain, grants only the signing tool access, and removes it on exit. Configure **Settings > Environments > release-signing** with main-only deployment restrictions and required reviewers if approval is desired; this does not require placing secrets in normal PR jobs.
+
+Production Developer ID signing, notarization and Gatekeeper acceptance must be validated by an authorized dispatch after these credentials are configured. Secretless CI validates native builds, the artifact handoff, package layout/provenance, and fail-closed signing checks; it does not claim that a real signed/notarized distribution was produced.
 
 ## References and license
 

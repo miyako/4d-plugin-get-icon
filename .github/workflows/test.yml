@@ -4,6 +4,7 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -24,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           submodules: recursive
           fetch-depth: 0
       - name: Configure (macOS)
@@ -37,49 +39,61 @@ jobs:
         run: cmake --build get-icon/build --config Release --parallel
       - name: Native tests
         run: ctest --test-dir get-icon/build -C Release --output-on-failure
-      - name: Resolve test runtime version
+      - name: Package provenance tests
+        run: python3 -m unittest discover -s scripts -p "test_*.py" -v
+      - name: 4D integration
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        id: version
-        shell: bash
-        run: |
-          compat=$(python3 -c "import json; print(json.load(open('get-icon/get-icon-test/Project/get-icon.4DProject'))['compatibilityVersion'])")
-          major=${compat:0:2}
-          minor=$((10#${compat:2:2}))
-          if [ "$minor" -lt 10 ]; then version="$major.$minor"; else version="$major R$((minor/10))"; fi
-          echo "branch=$major.x" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Download tool4d
-        if: ${{ !cancelled() && steps.version.outcome == 'success' }}
-        id: download
-        shell: bash
+        uses: ./.github/actions/tool4d-test
+      - name: Stage tested native input
         env:
-          BRANCH: ${{ steps.version.outputs.branch }}
-          VERSION: ${{ steps.version.outputs.version }}
-          PLATFORM: ${{ matrix.platform }}
-          ARCHIVE: ${{ matrix.archive }}
+          PLATFORM: ${{ runner.os == 'macOS' && 'macos' || 'windows' }}
+        run: python3 scripts/package.py stage --platform "$env:PLATFORM" --output .package-inputs
+        if: runner.os == 'Windows'
+      - name: Stage tested native input (macOS)
+        if: runner.os == 'macOS'
+        run: python3 scripts/package.py stage --platform macos --output .package-inputs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ runner.os == 'macOS' && 'macos' || 'windows' }}
+          path: .package-inputs/${{ runner.os == 'macOS' && 'macos' || 'windows' }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+  package-layout:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-macos
+          path: .package-inputs/macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-windows
+          path: .package-inputs/windows
+      - name: Validate same-run cross-platform assembly
         run: |
-          mkdir -p .local-tools
-          curl --fail --location --silent --show-error \
-            "https://resources-download.4d.com/release/$BRANCH/${VERSION// /%20}/latest/$PLATFORM/$ARCHIVE" \
-            -o .local-tools/tool4d.tar.xz
-          tar xJf .local-tools/tool4d.tar.xz -C .local-tools
-      - name: 4D integration (macOS)
-        if: ${{ !cancelled() && runner.os == 'macOS' && steps.download.outcome == 'success' }}
-        shell: bash
+          python3 scripts/package.py assemble --inputs .package-inputs --output "$RUNNER_TEMP/package-validation"
+          python3 scripts/package.py inventory --payload "$RUNNER_TEMP/package-validation/payload" --output "$RUNNER_TEMP/package-validation/payload/PROVENANCE.json"
+          python3 scripts/package.py verify --payload "$RUNNER_TEMP/package-validation/payload" --manifest "$RUNNER_TEMP/package-validation/payload/PROVENANCE.json"
+      - name: Exercise ZIP and DMG layout without distribution signing
         run: |
-          mkdir -p get-icon/get-icon-test/Resources
-          .local-tools/tool4d.app/Contents/MacOS/tool4d --dataless \
-            --startup-method=test_all \
-            --project="$PWD/get-icon/get-icon-test/Project/get-icon.4DProject" 2>&1 | tee .local-tools/test.log
-          grep -qx PASS .local-tools/test.log
-      - name: 4D integration (Windows)
-        if: ${{ !cancelled() && runner.os == 'Windows' && steps.download.outcome == 'success' }}
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force get-icon/get-icon-test/Resources | Out-Null
-          $runtime = Get-ChildItem .local-tools -Filter tool4d.exe -Recurse | Select-Object -First 1
-          if (!$runtime) { throw "tool4d.exe not found" }
-          $project = (Resolve-Path get-icon/get-icon-test/Project/get-icon.4DProject).Path
-          $output = & $runtime.FullName --dataless --startup-method=test_all "--project=$project" 2>&1
-          $output | Write-Output
-          if ($LASTEXITCODE -ne 0 -or !($output -cmatch '^PASS$')) { throw "4D integration failed" }
+          set -euo pipefail
+          PAYLOAD="$RUNNER_TEMP/package-validation/payload"
+          ditto -c -k --sequesterRsrc "$PAYLOAD" "$RUNNER_TEMP/layout-check.zip"
+          ditto -x -k "$RUNNER_TEMP/layout-check.zip" "$RUNNER_TEMP/layout-extracted"
+          python3 scripts/package.py verify --payload "$RUNNER_TEMP/layout-extracted" --manifest "$RUNNER_TEMP/layout-extracted/PROVENANCE.json"
+          hdiutil create -format UDZO -volname get-icon -srcfolder "$PAYLOAD" "$RUNNER_TEMP/layout-check.dmg"
+          mkdir "$RUNNER_TEMP/layout-mounted"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/layout-mounted" "$RUNNER_TEMP/layout-check.dmg"
+          trap 'hdiutil detach "$RUNNER_TEMP/layout-mounted"' EXIT
+          python3 scripts/package.py verify --payload "$RUNNER_TEMP/layout-mounted" --manifest "$RUNNER_TEMP/layout-mounted/PROVENANCE.json"
+          mkdir -p get-icon/get-icon-test/Plugins
+          ditto "$RUNNER_TEMP/layout-extracted/get-icon.bundle" get-icon/get-icon-test/Plugins/get-icon.bundle
+      - name: Smoke test combined plugin from the extracted archive
+        uses: ./.github/actions/tool4d-test

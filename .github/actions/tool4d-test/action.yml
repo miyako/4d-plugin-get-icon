@@ -1,0 +1,51 @@
+name: Test with tool4d
+description: Download the project-compatible runtime and require an explicit passing test result.
+runs:
+  using: composite
+  steps:
+    - name: Download tool4d
+      shell: bash
+      run: |
+        set -euo pipefail
+        compat=$(python3 -c "import json; print(json.load(open('get-icon/get-icon-test/Project/get-icon.4DProject'))['compatibilityVersion'])")
+        major=${compat:0:2}
+        minor=$((10#${compat:2:2}))
+        if [ "$minor" -lt 10 ]; then version="$major.$minor"; else version="$major R$((minor/10))"; fi
+        case "$RUNNER_OS" in
+          macOS)
+            platform=mac
+            case "$(uname -m)" in
+              arm64) archive=tool4d_arm64.tar.xz ;;
+              x86_64) archive=tool4d_x86_64.tar.xz ;;
+              *) echo "Unsupported macOS architecture" >&2; exit 1 ;;
+            esac ;;
+          Windows) platform=win; archive=tool4d_win.tar.xz ;;
+          *) echo "Unsupported tool4d platform" >&2; exit 1 ;;
+        esac
+        mkdir -p .local-tools
+        curl --fail --location --silent --show-error \
+          "https://resources-download.4d.com/release/$major.x/${version// /%20}/latest/$platform/$archive" \
+          -o .local-tools/tool4d.tar.xz
+        tar xJf .local-tools/tool4d.tar.xz -C .local-tools
+    - name: Test (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p get-icon/get-icon-test/Resources
+        .local-tools/tool4d.app/Contents/MacOS/tool4d --dataless \
+          --startup-method=test_all \
+          --project="$PWD/get-icon/get-icon-test/Project/get-icon.4DProject" 2>&1 | tee .local-tools/test.log
+        grep -qx PASS .local-tools/test.log
+    - name: Test (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force get-icon/get-icon-test/Resources | Out-Null
+        $runtime = Get-ChildItem .local-tools -Filter tool4d.exe -Recurse | Select-Object -First 1
+        if (!$runtime) { throw "tool4d.exe not found" }
+        $project = (Resolve-Path get-icon/get-icon-test/Project/get-icon.4DProject).Path
+        $output = & $runtime.FullName --dataless --startup-method=test_all "--project=$project" 2>&1
+        $exitCode = $LASTEXITCODE
+        $output | Write-Output
+        if ($exitCode -ne 0 -or !($output -cmatch '^PASS$')) { throw "4D integration failed" }
