@@ -56,9 +56,41 @@ bool bufferSize(UINT width, UINT height, UINT& stride, UINT& bytes)
     return true;
 }
 
-HRESULT iconFileCanvas(IShellItem* item, IWICImagingFactory* wic, UINT& largest)
+bool isIconFile(const std::wstring& path)
+{
+    return path.size() >= 4 &&
+        CompareStringOrdinal(path.data() + path.size() - 4, 4, L".ico", 4, TRUE) == CSTR_EQUAL;
+}
+
+HRESULT icoCanvas(IWICImagingFactory* wic, const std::wstring& path, UINT& largest)
 {
     largest = 0;
+    ComPtr<IWICBitmapDecoder> decoder;
+    HRESULT hr = wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                               WICDecodeMetadataCacheOnDemand,
+                                               decoder.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    UINT count = 0;
+    hr = decoder->GetFrameCount(&count);
+    if (FAILED(hr)) return hr;
+    for (UINT i = 0; i < count; ++i) {
+        ComPtr<IWICBitmapFrameDecode> frame;
+        hr = decoder->GetFrame(i, frame.GetAddressOf());
+        if (FAILED(hr)) return hr;
+        UINT width = 0, height = 0;
+        hr = frame->GetSize(&width, &height);
+        if (FAILED(hr)) return hr;
+        largest = std::max(largest, std::max(width, height));
+    }
+    return largest ? S_OK : WINCODEC_ERR_BADIMAGE;
+}
+
+HRESULT iconFileCanvas(IShellItem* item, IWICImagingFactory* wic,
+                       const std::wstring& nativePath, Kind kind, UINT& largest)
+{
+    largest = 0;
+    if (kind == Kind::file && isIconFile(nativePath))
+        return icoCanvas(wic, nativePath, largest);
     ComPtr<IExtractIconW> location;
     constexpr IID extractIconIID = {0x000214fa, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
     HRESULT hr = item->BindToHandler(nullptr, BHID_SFUIObject,
@@ -84,28 +116,9 @@ HRESULT iconFileCanvas(IShellItem* item, IWICImagingFactory* wic, UINT& largest)
     if (!written) return HRESULT_FROM_WIN32(GetLastError());
     if (written > needed) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
     const std::wstring path(expanded.data());
-    if (path.size() < 4 ||
-        CompareStringOrdinal(path.data() + path.size() - 4, 4, L".ico", 4, TRUE) != CSTR_EQUAL)
+    if (!isIconFile(path))
         return S_FALSE;
-
-    ComPtr<IWICBitmapDecoder> decoder;
-    hr = wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
-                                        WICDecodeMetadataCacheOnDemand,
-                                        decoder.GetAddressOf());
-    if (FAILED(hr)) return hr;
-    UINT count = 0;
-    hr = decoder->GetFrameCount(&count);
-    if (FAILED(hr)) return hr;
-    for (UINT i = 0; i < count; ++i) {
-        ComPtr<IWICBitmapFrameDecode> frame;
-        hr = decoder->GetFrame(i, frame.GetAddressOf());
-        if (FAILED(hr)) return hr;
-        UINT width = 0, height = 0;
-        hr = frame->GetSize(&width, &height);
-        if (FAILED(hr)) return hr;
-        largest = std::max(largest, std::max(width, height));
-    }
-    return largest ? S_OK : WINCODEC_ERR_BADIMAGE;
+    return icoCanvas(wic, path, largest);
 }
 
 Result encode(IWICImagingFactory* wic, HBITMAP handle, UINT size)
@@ -256,7 +269,7 @@ Result extract(const std::u16string& path, std::int32_t size, Kind kind)
     hr = imageFactory.As(&item);
     if (FAILED(hr)) return failure("Query Shell item", hr);
     UINT nativeCanvas = 0;
-    hr = iconFileCanvas(item.Get(), wic.Get(), nativeCanvas);
+    hr = iconFileCanvas(item.Get(), wic.Get(), nativePath, kind, nativeCanvas);
     if (FAILED(hr)) return failure("Read Shell icon file canvas", hr);
     if (nativeCanvas && nativeCanvas < static_cast<UINT>(size)) {
         // On Windows, SCALEUP can return an oversized, partly uninitialized

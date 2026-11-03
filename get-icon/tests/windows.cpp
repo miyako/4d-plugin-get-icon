@@ -350,7 +350,9 @@ void run()
     write(icon, iconFixture());
     const auto custom = customFolder(fixtures.root / L"\u30ab\u30b9\u30bf\u30e0", icon);
     for (int size : {32, 48, 64, 128, 256, 257}) {
+        std::cout << "Legacy ICO file size=" << size << '\n';
         checkFixture(load(icon, size, icons::Kind::file));
+        std::cout << "Legacy ICO folder size=" << size << '\n';
         checkFixture(load(custom, size, icons::Kind::folder));
     }
 
@@ -360,7 +362,9 @@ void run()
     write(paddedIcon, iconFixture(256, 120));
     const auto paddedFolder = customFolder(fixtures.root / L"\u4f59\u767d", paddedIcon);
     for (int size : {256, 257}) {
+        std::cout << "Intentionally padded ICO file size=" << size << '\n';
         checkPaddedFixture(load(paddedIcon, size, icons::Kind::file));
+        std::cout << "Intentionally padded ICO folder size=" << size << '\n';
         checkPaddedFixture(load(paddedFolder, size, icons::Kind::folder));
     }
 }
