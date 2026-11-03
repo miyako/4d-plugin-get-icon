@@ -1,6 +1,6 @@
 {
     "Tests": {
-        "methods": ["test_all", "test_icons"]
+        "methods": ["test_all", "test_icons", "test_icons_process"]
     },
     "trash": {}
 }
