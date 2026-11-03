@@ -19,6 +19,7 @@
 #include <memory>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 
 namespace {
 using Microsoft::WRL::ComPtr;
@@ -352,15 +353,53 @@ void run()
     require(SetFileAttributesW(custom.c_str(), FILE_ATTRIBUTE_READONLY) != 0,
             "Set custom folder read-only attribute failed");
     require(fs::exists(custom / L"desktop.ini"), "Shell did not create desktop.ini");
+    {
+        std::ifstream ini(custom / L"desktop.ini", std::ios::binary);
+        std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(ini)), {});
+        std::cout << "AUTO desktop.ini bytes=" << bytes.size() << " prefix:";
+        for (std::size_t i = 0; i < std::min<std::size_t>(bytes.size(), 80); ++i)
+            std::cout << ' ' << std::hex << unsigned(bytes[i]);
+        std::cout << std::dec << " folderAttrs=" << GetFileAttributesW(custom.c_str())
+                  << " iniAttrs=" << GetFileAttributesW((custom / L"desktop.ini").c_str())
+                  << '\n';
+        wchar_t resource[1024]{};
+        const DWORD count = GetPrivateProfileStringW(L".ShellClassInfo", L"IconResource", L"",
+            resource, 1024, (custom / L"desktop.ini").c_str());
+        std::cout << "AUTO IconResource chars=" << count
+                  << " expected=" << iconPath.size() + 2 << " units:";
+        for (DWORD i = 0; i < count; ++i)
+            std::cout << ' ' << std::hex << unsigned(resource[i]);
+        std::cout << std::dec << '\n';
+    }
     SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, custom.c_str(), nullptr);
     diagnoseShellBitmap(icon, 32, "ICO");
     diagnoseShellBitmap(custom, 32, "folder");
     diagnoseShellBitmap(custom, 256, "folder");
     diagnoseShellBitmap(custom, 257, "folder");
     checkFixture(load(icon, 32, icons::Kind::file));
-    checkFixture(load(custom, 32, icons::Kind::folder));
-    checkFixture(load(custom, 256, icons::Kind::folder));
-    checkFixture(load(custom, 257, icons::Kind::folder));
+
+    const auto explicitCustom = fixtures.root / L"\u30ab\u30b9\u30bf\u30e0-Unicode-INI";
+    require(fs::create_directory(explicitCustom), "Create explicit custom folder failed");
+    write(explicitCustom / L"fixture.ico", legacyIcon());
+    const std::u16string contents =
+        u"\uFEFF[.ShellClassInfo]\r\nIconResource=fixture.ico,0\r\n"
+        u"IconFile=fixture.ico\r\nIconIndex=0\r\n";
+    std::vector<unsigned char> iniBytes;
+    for (char16_t ch : contents) append16(iniBytes, ch);
+    write(explicitCustom / L"desktop.ini", iniBytes);
+    require(SetFileAttributesW((explicitCustom / L"desktop.ini").c_str(),
+            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0,
+            "Set explicit desktop.ini attributes failed");
+    require(SetFileAttributesW(explicitCustom.c_str(),
+            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM) != 0,
+            "Set explicit custom folder attributes failed");
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, explicitCustom.c_str(), nullptr);
+    diagnoseShellBitmap(explicitCustom, 32, "explicit folder");
+    diagnoseShellBitmap(explicitCustom, 256, "explicit folder");
+    diagnoseShellBitmap(explicitCustom, 257, "explicit folder");
+    checkFixture(load(explicitCustom, 32, icons::Kind::folder));
+    checkFixture(load(explicitCustom, 256, icons::Kind::folder));
+    checkFixture(load(explicitCustom, 257, icons::Kind::folder));
 }
 } // namespace
 
