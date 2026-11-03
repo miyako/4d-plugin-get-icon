@@ -86,4 +86,4 @@ Require both a successful exit and an exact `PASS` output line: tool4d can exit 
 
 ## References and license
 
-Path conversion follows the [extract plugin](https://github.com/miyako/4d-plugin-extract/blob/main/4DPlugin-Universal-Document-Parser.cpp); encoded PNG picture creation follows [qrencode-v2](https://github.com/miyako/4d-plugin-qrencode-v2/blob/master/4DPlugin-qrencode.cpp). Native code and scaffold are under [MIT](LICENSE); see the SDK's separate license in its submodule.
+Native code and scaffold are under [MIT](LICENSE); see the SDK's separate license in its submodule.
