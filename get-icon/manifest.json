@@ -1,0 +1,16 @@
+{
+    "name": "get-icon",
+    "id": 31071,
+    "commands": [
+        {
+            "theme": "File icons",
+            "syntax": "File Get icon(&J;&L):P",
+            "threadSafe": false
+        },
+        {
+            "theme": "File icons",
+            "syntax": "Folder Get icon(&J;&L):P",
+            "threadSafe": false
+        }
+    ]
+}
