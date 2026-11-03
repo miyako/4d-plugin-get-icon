@@ -1,0 +1,11 @@
+{
+ "name": "example",
+ "id": 20000,
+ "commands": [
+ {
+ "theme": "test",
+ "syntax": "example_greeting(&T;&L):T",
+ "threadSafe": true
+ }
+ ]
+}
