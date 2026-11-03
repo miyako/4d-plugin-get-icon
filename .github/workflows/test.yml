@@ -79,6 +79,11 @@ jobs:
       - name: Validate same-run cross-platform assembly
         run: |
           python3 scripts/package.py assemble --inputs .package-inputs --output "$RUNNER_TEMP/package-validation"
+          # A test-only ad-hoc seal exercises the real combined bundle layout.
+          # It is never uploaded as a distribution or accepted by production signing.
+          codesign --force --sign - "$RUNNER_TEMP/package-validation/payload/get-icon.bundle"
+          codesign --verify --strict "$RUNNER_TEMP/package-validation/payload/get-icon.bundle"
+          codesign --verify --strict "$RUNNER_TEMP/package-validation/payload/get-icon.bundle/Contents/MacOS/get-icon"
           python3 scripts/package.py inventory --payload "$RUNNER_TEMP/package-validation/payload" --output "$RUNNER_TEMP/package-validation/payload/PROVENANCE.json"
           python3 scripts/package.py verify --payload "$RUNNER_TEMP/package-validation/payload" --manifest "$RUNNER_TEMP/package-validation/payload/PROVENANCE.json"
       - name: Exercise ZIP and DMG layout without distribution signing

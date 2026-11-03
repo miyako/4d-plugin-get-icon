@@ -53,6 +53,8 @@ Filesystem objects are reconstructed using 4D's File/Folder constructor and `fk 
 
 ## Build and installation
 
+Download the ZIP or DMG from [Releases](https://github.com/miyako/4d-plugin-get-icon/releases). Extract or mount it, then copy **get-icon.bundle** into your database's **Plugins** folder and restart 4D. Keep the bundle's `Contents` hierarchy intact. Both downloads include macOS universal and Windows x64 binaries; macOS is Developer ID signed/notarized, while Windows is not Authenticode signed.
+
 The project adapts the tutorial's `example/` CMake and test-project scaffold. CMake is the single supported build surface; generate IDE projects with `-G Xcode` or the installed Visual Studio generator rather than maintaining stale template IDE projects.
 
 ```sh
@@ -82,13 +84,15 @@ Run the integration suite with a matching [tool4d](https://developer.4d.com/docs
 
 Require both a successful exit and an exact `PASS` output line: tool4d can exit zero after a language error. The integration suite also checks extraction from another cooperative 4D process. `.github/workflows/test.yml` builds and runs native/4D tests on macOS and Windows for pushes, pull requests, and manual dispatch.
 
-**Normal builds and PR tests require no custom secrets.** Checkout uses GitHub's automatic `GITHUB_TOKEN` with read-only contents access; tool4d downloads publicly and needs no license activation. CI also stages the tested native binaries, checks their source-bound manifests, and validates the real same-run macOS/Windows artifact handoff. These short-lived build inputs are not signed distribution packages.
+**Normal builds and PR tests require no custom secrets.** Checkout uses GitHub's automatic `GITHUB_TOKEN` with read-only contents access; tool4d downloads publicly and needs no license activation. CI also stages the tested native binaries, checks their source-bound manifests, and validates the real same-run macOS/Windows artifact handoff. A test-only ad-hoc seal exercises strict bundle verification, ZIP/DMG round-trips and the combined plugin's smoke test; it is never uploaded as a distribution or accepted by production signing. The short-lived build inputs are not signed distribution packages.
 
 ## Signed distribution packages
 
 `.github/workflows/release.yml` adds **macOS Developer ID Application signing and Apple notarization**. Windows Authenticode signing is intentionally not implemented: the included Windows `.4DX` remains unsigned.
 
-Run **Signed release packages** manually in GitHub Actions, choosing **main**. Other refs are rejected by the production job and signing script. The dispatch's immutable commit is used for both platforms, the existing native/tool4d tests, input manifests, and packaging. This workflow does not bump versions, create/push tags, merge code, or publish a GitHub Release. It uploads Actions artifacts only. `VERSION` remains the single version source; repeated dispatches are distinguished by their commit and Actions run.
+Run **Build and Release** manually in GitHub Actions, choosing **main**. Other refs are rejected by the production job and signing script. The dispatch's immutable commit is used for both platforms, the existing native/tool4d tests, input manifests, and packaging. `VERSION` remains the single version source; the workflow never bumps it or merges code.
+
+Only after all signing, notarization, verification and packaged smoke tests succeed, a separate publication job receives `contents: write`. It creates `v<VERSION>` at the exact dispatch commit, uploads a draft GitHub Release, downloads the uploaded assets and verifies their checksums, then publishes it. Existing tags are never moved; a tag for another commit or an existing release stops publication rather than overwriting assets. A failed draft upload remains a draft for inspection, not a public release. The other jobs and all normal CI remain read-only.
 
 The workflow builds a universal macOS binary and Windows x64 binary, verifies their hashes, versions and source/SDK commits, and assembles one portable plugin:
 
@@ -100,6 +104,8 @@ get-icon.bundle/
     Windows64/get-icon.4DX
     Resources/manifest.json
 ```
+
+The packaging and verification utilities use Python 3.11+ and its standard library; the hosted runners provide this, with no additional Python packages required.
 
 The bundle is Developer ID signed with hardened runtime and a secure timestamp. Signing identity and the resulting signature must match `NOTARYTOOL_TEAM_ID`. Verification, missing credentials, a signing error, or any notarization status other than **Accepted** fails the workflow; there is no ad-hoc or unsigned production fallback. The DMG container is separately signed and notarized, then stapled, validated, and assessed by Gatekeeper. The ZIP is notarized but cannot itself carry a stapled ticket; use the DMG for a stapled download.
 

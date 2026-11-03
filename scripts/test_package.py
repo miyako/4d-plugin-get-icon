@@ -6,20 +6,38 @@ import os
 from pathlib import Path, PureWindowsPath
 import plistlib
 import shutil
+import stat
 import struct
 import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 
 import package
+
+
+def remove_readonly(function, path, exc_info):
+    """Retry only a read-only fixture entry, without following symlinks."""
+    error = exc_info[1]
+    entry = Path(path)
+    if not isinstance(error, PermissionError) or entry.is_symlink():
+        raise error
+    mode = entry.stat().st_mode
+    if mode & stat.S_IWUSR:
+        raise error
+    entry.chmod(stat.S_IMODE(mode) | stat.S_IWUSR)
+    function(path)
+
+
+def remove_fixture(path):
+    shutil.rmtree(path, onerror=remove_readonly)
 
 
 class PackageTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(__file__).resolve().parent / (".test-package-" + uuid.uuid4().hex)
         self.root.mkdir()
-        self.addCleanup(shutil.rmtree, self.root)
+        self.addCleanup(remove_fixture, self.root)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(package, "ROOT", self.root))
@@ -301,7 +319,12 @@ class SnapshotTests(unittest.TestCase):
     def setUp(self):
         self.fixture = Path(__file__).resolve().parent / (".test-snapshot-" + uuid.uuid4().hex)
         self.fixture.mkdir()
-        self.addCleanup(shutil.rmtree, self.fixture)
+        self.addCleanup(remove_fixture, self.fixture)
+        global_config = self.fixture / "global.gitconfig"
+        global_config.write_bytes(b"[core]\n\tautocrlf = true\n\teol = crlf\n")
+        global_patch = patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(global_config)})
+        global_patch.start()
+        self.addCleanup(global_patch.stop)
         self.repo = self.fixture / "repo"
         origin = self.fixture / "sdk-origin"
         self.repo.mkdir()
@@ -314,8 +337,10 @@ class SnapshotTests(unittest.TestCase):
         (origin / "LICENSE.md").write_bytes(b"SDK license\n")
         self.git(origin, "add", ".")
         self.git(origin, "commit", "--quiet", "-m", "SDK fixture")
-        self.git(self.repo, "-c", "protocol.file.allow=always", "submodule", "add",
-                 "--quiet", str(origin), "4D-Plugin-SDK")
+        # Configure before cloning: changing autocrlf after checkout leaves CRLF
+        # files dirty when the SDK fixture's immutable blobs contain LF.
+        self.git(self.repo, "-c", "protocol.file.allow=always", "-c", "core.autocrlf=false",
+                 "submodule", "add", "--quiet", str(origin), "4D-Plugin-SDK")
         self.sdk = self.repo / "4D-Plugin-SDK"
         self.git(self.sdk, "config", "user.name", "Package Test")
         self.git(self.sdk, "config", "user.email", "package@example.invalid")
@@ -335,6 +360,10 @@ class SnapshotTests(unittest.TestCase):
         return subprocess.check_output(["git", *args], cwd=directory, stderr=subprocess.PIPE)
 
     def test_clean_snapshot_and_ignored_outputs(self):
+        self.assertEqual(self.git(self.repo, "config", "--global", "core.autocrlf").strip(), b"true")
+        self.assertEqual((self.sdk / "LICENSE.md").read_bytes(), b"SDK license\n")
+        self.assertEqual(self.git(self.sdk, "status", "--porcelain",
+                                  "--untracked-files=normal"), b"")
         for name in (".package-inputs", "build-universal", ".local-tools", "scripts/__pycache__"):
             directory = self.repo / name
             directory.mkdir(parents=True)
@@ -351,6 +380,17 @@ class SnapshotTests(unittest.TestCase):
         self.git(self.repo, "add", "source.cpp")
         with self.assertRaisesRegex(package.PackageError, "Source checkout is dirty"):
             package.snapshot()
+
+    def test_inherited_crlf_control_reproduces_dirty_sdk(self):
+        control = self.repo / ".package-inputs/crlf-control"
+        control.parent.mkdir()
+        self.git(self.repo, "-c", "protocol.file.allow=always", "-c", "core.autocrlf=true",
+                 "clone", "--quiet", str(self.fixture / "sdk-origin"), str(control))
+        self.assertIn(b"\r\n", (control / "LICENSE.md").read_bytes())
+        self.git(control, "config", "core.autocrlf", "false")
+        self.assertIn(b"LICENSE.md", self.git(control, "status", "--porcelain"))
+        self.assertEqual((self.sdk / "LICENSE.md").read_bytes(), b"SDK license\n")
+        package.snapshot()
 
     def test_untracked_source(self):
         (self.repo / "new-source.cpp").write_bytes(b"untracked source\n")
@@ -411,6 +451,32 @@ class SnapshotTests(unittest.TestCase):
 
 
 class NativeMetadataTests(unittest.TestCase):
+    def test_readonly_fixture_cleanup(self):
+        root = Path(__file__).resolve().parent / (".test-cleanup-" + uuid.uuid4().hex)
+        root.mkdir()
+        self.addCleanup(lambda: remove_fixture(root) if root.exists() else None)
+        path = root / "readonly-object"
+        path.write_bytes(b"fixture Git object")
+        path.chmod(stat.S_IREAD)
+        retry = Mock()
+        error = PermissionError("fixture entry is read-only")
+        remove_readonly(retry, str(path), (PermissionError, error, None))
+        retry.assert_called_once_with(str(path))
+        self.assertTrue(path.stat().st_mode & stat.S_IWUSR)
+        with self.assertRaises(PermissionError):
+            remove_readonly(retry, str(path), (PermissionError, error, None))
+        other_error = OSError("not a read-only error")
+        with self.assertRaises(OSError):
+            remove_readonly(retry, str(path), (OSError, other_error, None))
+        retry.reset_mock()
+        with patch.object(Path, "is_symlink", return_value=True):
+            with self.assertRaises(PermissionError):
+                remove_readonly(retry, str(path), (PermissionError, error, None))
+        retry.assert_not_called()
+        path.chmod(stat.S_IREAD)
+        remove_fixture(root)
+        self.assertFalse(root.exists())
+
     def test_semver(self):
         for version in ("0.0.0", "1.2.3", "1.2.3-rc.1+build.42", "1.2.3-0"):
             self.assertIsNotNone(package.SEMVER.fullmatch(version), version)
@@ -420,7 +486,7 @@ class NativeMetadataTests(unittest.TestCase):
     def test_cmake_compiler_parsing(self):
         root = Path(__file__).resolve().parent / (".test-compiler-" + uuid.uuid4().hex)
         root.mkdir()
-        self.addCleanup(shutil.rmtree, root)
+        self.addCleanup(remove_fixture, root)
         compiler = root / "get-icon/build/CMakeFiles/4.0/CMakeCXXCompiler.cmake"
         compiler.parent.mkdir(parents=True)
         compiler.write_text('set(CMAKE_CXX_COMPILER_ID "MSVC")\n'

@@ -1,4 +1,4 @@
-name: Signed release packages
+name: Build and Release
 
 on:
   workflow_dispatch:
@@ -82,3 +82,69 @@ jobs:
           path: ${{ runner.temp }}/get-icon-distribution/
           if-no-files-found: error
           retention-days: 14
+  publish:
+    needs: sign-package
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: get-icon-signed-packages-${{ github.sha }}
+          path: .signed-distribution
+      - name: Verify the downloaded final distribution
+        run: |
+          set -euo pipefail
+          VERSION=$(cat VERSION)
+          cd .signed-distribution
+          shasum -a 256 -c SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          ditto -x -k ".signed-distribution/get-icon-$VERSION.zip" "$RUNNER_TEMP/publish-extracted"
+          python3 scripts/package.py verify --payload "$RUNNER_TEMP/publish-extracted" --manifest "$RUNNER_TEMP/publish-extracted/PROVENANCE.json"
+          TEAM=$(python3 -c "import json; print(json.load(open('.signed-distribution/PROVENANCE.json'))['expected_team'])")
+          codesign --verify --strict "$RUNNER_TEMP/publish-extracted/get-icon.bundle"
+          codesign --display --verbose=4 "$RUNNER_TEMP/publish-extracted/get-icon.bundle" 2> "$RUNNER_TEMP/publish-bundle-signature"
+          python3 scripts/release_checks.py signature --details "$RUNNER_TEMP/publish-bundle-signature" --team "$TEAM" --runtime
+          codesign --verify --strict ".signed-distribution/get-icon-$VERSION.dmg"
+          codesign --display --verbose=4 ".signed-distribution/get-icon-$VERSION.dmg" 2> "$RUNNER_TEMP/publish-dmg-signature"
+          python3 scripts/release_checks.py signature --details "$RUNNER_TEMP/publish-dmg-signature" --team "$TEAM"
+          xcrun stapler validate ".signed-distribution/get-icon-$VERSION.dmg"
+          spctl --assess --type open --context context:primary-signature ".signed-distribution/get-icon-$VERSION.dmg"
+      - name: Publish new immutable version after verifying draft upload bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(cat VERSION)
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          TAG="v$VERSION"
+          set +e
+          git ls-remote --exit-code origin "refs/tags/$TAG" > "$RUNNER_TEMP/existing-tag"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            git fetch --no-tags origin "refs/tags/$TAG"
+            [ "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$GITHUB_SHA" ] || {
+              echo "::error::Existing version tag points to another commit; refusing to move it."
+              exit 1
+            }
+          elif [ "$status" -eq 2 ]; then
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" > /dev/null
+          else
+            echo "::error::Could not inspect remote version tag."
+            exit "$status"
+          fi
+          printf "Native file and folder icons for 4D 21.1+.\n\nSource commit: \`%s\`\n\nmacOS universal: Developer ID signed and notarized. Windows x64: included, not Authenticode signed. Download the ZIP for the cross-platform bundle or the signed, stapled DMG. Verify SHA256SUMS before installation.\n" "$GITHUB_SHA" > "$RUNNER_TEMP/release-notes"
+          gh release create "$TAG" .signed-distribution/* --verify-tag --target "$GITHUB_SHA" \
+            --title "$TAG" --notes-file "$RUNNER_TEMP/release-notes" --draft
+          gh release download "$TAG" --dir "$RUNNER_TEMP/draft-upload-check"
+          cmp .signed-distribution/SHA256SUMS "$RUNNER_TEMP/draft-upload-check/SHA256SUMS"
+          cd "$RUNNER_TEMP/draft-upload-check"
+          shasum -a 256 -c SHA256SUMS
+          [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" = "$GITHUB_SHA" ]
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

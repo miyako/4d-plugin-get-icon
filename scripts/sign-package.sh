@@ -5,6 +5,10 @@ if [[ "${GITHUB_EVENT_NAME:-}" != workflow_dispatch || "${GITHUB_REF:-}" != refs
     echo "Production signing requires an explicit dispatch from main." >&2
     exit 1
 fi
+if [[ "$(uname -s)" != Darwin ]]; then
+    echo "Developer ID signing requires macOS." >&2
+    exit 1
+fi
 
 python3 - <<'PY'
 import os
@@ -50,6 +54,9 @@ cleanup() {
     exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 printf '%s' "$APPLE_DEVELOPER_ID_CERTIFICATE" | base64 --decode -o "$CERT_PATH"
 security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"

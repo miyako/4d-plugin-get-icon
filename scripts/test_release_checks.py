@@ -2,6 +2,7 @@ import hashlib
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -57,6 +58,7 @@ class ReleaseChecks(unittest.TestCase):
             self.assertEqual((root / "SHA256SUMS").read_text(), expected)
             self.assertNotEqual((root / "SHA256SUMS").read_bytes(), old)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Production signing shell runs only on macOS")
     def test_signing_requires_main_dispatch_and_all_secrets(self):
         names = (
             "APPLE_DEVELOPER_ID_CERTIFICATE", "APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD",
