@@ -7,7 +7,6 @@
 
 #include <windows.h>
 #include <shlobj.h>
-#include <shobjidl.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -16,10 +15,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <memory>
 #include <stdexcept>
 #include <thread>
-#include <type_traits>
 
 namespace {
 using Microsoft::WRL::ComPtr;
@@ -94,35 +91,44 @@ void append32(std::vector<unsigned char>& out, unsigned value)
     append16(out, value >> 16);
 }
 
-std::vector<unsigned char> legacyIcon()
+std::vector<unsigned char> iconFixture(unsigned size = 32, unsigned margin = 8)
 {
     std::vector<unsigned char> out;
     append16(out, 0); append16(out, 1); append16(out, 1);
-    out.insert(out.end(), {32, 32, 0, 0});
+    const auto dimension = static_cast<unsigned char>(size);
+    out.insert(out.end(), {dimension, dimension, 0, 0});
     append16(out, 1); append16(out, 32);
-    append32(out, 40 + 32 * 32 * 4 + 32 * 4);
+    const unsigned maskStride = ((size + 31) / 32) * 4;
+    append32(out, 40 + size * size * 4 + size * maskStride);
     append32(out, 22);
-    append32(out, 40); append32(out, 32); append32(out, 64);
+    append32(out, 40); append32(out, size); append32(out, size * 2);
     append16(out, 1); append16(out, 32);
-    append32(out, BI_RGB); append32(out, 32 * 32 * 4);
+    append32(out, BI_RGB); append32(out, size * size * 4);
     append32(out, 0); append32(out, 0); append32(out, 0); append32(out, 0);
     // ICO DIB pixels have straight BGRA. Half the colored square is translucent
     // with R>A, distinguishing straight pixels from premultiplied pixels.
-    for (unsigned row = 0; row < 32; ++row) {
-        const unsigned y = 31 - row;
-        for (unsigned x = 0; x < 32; ++x) {
-            if (x >= 8 && x < 24 && y >= 8 && y < 24)
+    for (unsigned row = 0; row < size; ++row) {
+        const unsigned y = size - 1 - row;
+        for (unsigned x = 0; x < size; ++x) {
+            if (x >= margin && x < size - margin && y >= margin && y < size - margin)
                 out.insert(out.end(), {32, 96, 192,
-                    static_cast<unsigned char>(x < 16 ? 255 : 128)});
+                    static_cast<unsigned char>(x < size / 2 ? 255 : 128)});
             else
                 out.insert(out.end(), {0, 0, 0, 0});
         }
     }
-    for (unsigned row = 0; row < 32; ++row) {
-        const unsigned y = 31 - row;
+    for (unsigned row = 0; row < size; ++row) {
+        const unsigned y = size - 1 - row;
         // A 1-bit AND mask, DWORD aligned, matching the transparent margins.
-        const unsigned mask = (y >= 8 && y < 24) ? 0xFF0000FFu : 0xFFFFFFFFu;
-        append32(out, mask);
+        for (unsigned byte = 0; byte < maskStride; ++byte) {
+            unsigned mask = 0;
+            for (unsigned bit = 0; bit < 8; ++bit) {
+                const unsigned x = byte * 8 + bit;
+                if (x < margin || x >= size - margin || y < margin || y >= size - margin)
+                    mask |= 0x80u >> bit;
+            }
+            out.push_back(static_cast<unsigned char>(mask));
+        }
     }
     return out;
 }
@@ -131,70 +137,6 @@ struct Image {
     UINT width = 0, height = 0;
     std::vector<unsigned char> rgba;
 };
-
-void diagnoseShellBitmap(const fs::path& path, int size, const char* label)
-{
-    ComPtr<IShellItemImageFactory> shell;
-    check(SHCreateItemFromParsingName(path.c_str(), nullptr,
-          IID_PPV_ARGS(shell.GetAddressOf())), "Diagnostic shell factory");
-    HBITMAP raw = nullptr;
-    check(shell->GetImage(SIZE{size, size},
-          static_cast<SIIGBF>(SIIGBF_ICONONLY | SIIGBF_SCALEUP), &raw),
-          "Diagnostic GetImage");
-    auto deleter = [](HBITMAP value) { DeleteObject(value); };
-    std::unique_ptr<std::remove_pointer_t<HBITMAP>, decltype(deleter)> owned(raw, deleter);
-    DIBSECTION dib{};
-    const int objectBytes = GetObjectW(raw, sizeof(dib), &dib);
-    std::cout << "SHELL " << label << " request=" << size
-              << " GetObject=" << objectBytes
-              << " dimensions=" << dib.dsBm.bmWidth << 'x' << dib.dsBm.bmHeight
-              << " bitCount=" << dib.dsBm.bmBitsPixel
-              << " dibHeight=" << dib.dsBmih.biHeight << '\n';
-    ComPtr<IWICImagingFactory> wic;
-    check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-          IID_PPV_ARGS(wic.GetAddressOf())), "Diagnostic WIC factory");
-    for (auto option : {WICBitmapUseAlpha, WICBitmapUsePremultipliedAlpha}) {
-        ComPtr<IWICBitmap> bitmap;
-        check(wic->CreateBitmapFromHBITMAP(raw, nullptr, option, bitmap.GetAddressOf()),
-              "Diagnostic import HBITMAP");
-        UINT width = 0, height = 0;
-        check(bitmap->GetSize(&width, &height), "Diagnostic bitmap dimensions");
-        ComPtr<IWICFormatConverter> converter;
-        check(wic->CreateFormatConverter(converter.GetAddressOf()), "Diagnostic converter");
-        check(converter->Initialize(bitmap.Get(), GUID_WICPixelFormat32bppRGBA,
-              WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom),
-              "Diagnostic straight RGBA conversion");
-        std::vector<unsigned char> pixels(static_cast<std::size_t>(width) * height * 4);
-        check(converter->CopyPixels(nullptr, width * 4,
-              static_cast<UINT>(pixels.size()), pixels.data()), "Diagnostic CopyPixels");
-        std::cout << "  import=" << int(option) << " RGBA:";
-        for (auto x : {width / 8, width * 3 / 8, width * 5 / 8}) {
-            const auto offset = (static_cast<std::size_t>(height / 2) * width + x) * 4;
-            std::cout << " (" << int(pixels[offset]) << ',' << int(pixels[offset + 1])
-                      << ',' << int(pixels[offset + 2]) << ',' << int(pixels[offset + 3])
-                      << ')';
-        }
-        UINT left = width, top = height, right = 0, bottom = 0;
-        bool partialFound = false;
-        for (UINT y = 0; y < height; ++y)
-            for (UINT x = 0; x < width; ++x) {
-                const auto offset = (static_cast<std::size_t>(y) * width + x) * 4;
-                if (pixels[offset + 3]) {
-                    left = std::min(left, x); right = std::max(right, x);
-                    top = std::min(top, y); bottom = std::max(bottom, y);
-                }
-                if (!partialFound && pixels[offset + 3] && pixels[offset + 3] != 255) {
-                    partialFound = true;
-                    std::cout << " firstPartial@" << x << ',' << y << "=("
-                              << int(pixels[offset]) << ',' << int(pixels[offset + 1])
-                              << ',' << int(pixels[offset + 2]) << ','
-                              << int(pixels[offset + 3]) << ')';
-                }
-            }
-        std::cout << " alphaBounds=" << left << ',' << top << '-' << right << ','
-                  << bottom << '\n';
-    }
-}
 
 Image decode(const icons::Result& result)
 {
@@ -261,19 +203,25 @@ void reject(const std::u16string& path, int size, icons::Kind kind)
             "Invalid input did not return an explicit failure");
 }
 
-void checkFixture(const Image& image)
+void checkPartial(const Image& image, UINT x, UINT y)
 {
-    const UINT size = image.width;
     const auto* partial = image.rgba.data() +
-        (static_cast<std::size_t>(size / 2) * size + size * 5 / 8) * 4;
-    std::cout << "PNG fixture " << size << " RGBA=(" << int(partial[0]) << ','
-              << int(partial[1]) << ',' << int(partial[2]) << ',' << int(partial[3])
-              << ")\n";
+        (static_cast<std::size_t>(y) * image.width + x) * 4;
+    const std::string message = "Custom icon lost straight-alpha edge colors/partial transparency: size=" +
+        std::to_string(image.width) + " RGBA=(" + std::to_string(partial[0]) + "," +
+        std::to_string(partial[1]) + "," + std::to_string(partial[2]) + "," +
+        std::to_string(partial[3]) + ")";
     require(std::abs(int(partial[0]) - 192) <= 6 &&
                 std::abs(int(partial[1]) - 96) <= 6 &&
                 std::abs(int(partial[2]) - 32) <= 6 &&
                 std::abs(int(partial[3]) - 128) <= 8,
-            "Custom icon lost straight-alpha edge colors/partial transparency");
+            message.c_str());
+}
+
+void checkFixture(const Image& image)
+{
+    const UINT size = image.width;
+    checkPartial(image, size * 5 / 8, size / 2);
     require(image.rgba[3] == 0, "Custom icon lost its transparent corner");
     UINT left = size, right = 0, top = size, bottom = 0;
     for (UINT y = 0; y < size; ++y)
@@ -288,6 +236,49 @@ void checkFixture(const Image& image)
     require(right >= left && bottom >= top &&
                 right - left + 1 >= size / 3 && bottom - top + 1 >= size / 3,
             "Legacy 32px custom icon was not scaled to the requested canvas");
+}
+
+void checkPaddedFixture(const Image& image)
+{
+    const UINT size = image.width;
+    checkPartial(image, size / 2 + size / 64, size / 2);
+    require(image.rgba[3] == 0, "Padded icon lost its transparent corner");
+    unsigned visible = 0;
+    for (UINT y = 0; y < size; ++y)
+        for (UINT x = 0; x < size; ++x)
+            if (image.rgba[(static_cast<std::size_t>(y) * size + x) * 4 + 3] > 16) {
+                ++visible;
+                require(x >= size * 7 / 16 && x < size * 9 / 16 &&
+                            y >= size * 7 / 16 && y < size * 9 / 16,
+                        "Intentional wide artwork margins were cropped or rescaled");
+            }
+    require(visible >= 144 && visible <= 400,
+            "A native 256px resource canvas was mistaken for a legacy 32px canvas");
+}
+
+fs::path customFolder(const fs::path& path, const fs::path& icon)
+{
+    require(fs::create_directory(path), "Create custom folder failed");
+    // SHGetSetFolderCustomSettings creates ANSI desktop.ini on this Windows
+    // runner, losing Japanese icon paths. Supply an explicit UTF-16LE BOM.
+    const std::u16string contents = u"\uFEFF[.ShellClassInfo]\r\nIconResource=" +
+        icon.u16string() + u",0\r\nIconFile=" + icon.u16string() + u"\r\nIconIndex=0\r\n";
+    std::vector<unsigned char> bytes;
+    for (char16_t ch : contents) append16(bytes, ch);
+    const auto ini = path / L"desktop.ini";
+    write(ini, bytes);
+    const std::wstring expected = icon.wstring() + L",0";
+    std::vector<wchar_t> decoded(expected.size() + 1, L'\0');
+    const DWORD count = GetPrivateProfileStringW(L".ShellClassInfo", L"IconResource", L"",
+        decoded.data(), static_cast<DWORD>(decoded.size()), ini.c_str());
+    require(count == expected.size() && expected == decoded.data(),
+            "desktop.ini did not preserve the Unicode icon resource path");
+    require(SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0,
+            "Set desktop.ini attributes failed");
+    require(SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM) != 0,
+            "Set custom folder attributes failed");
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, path.c_str(), nullptr);
+    return path;
 }
 
 void run()
@@ -356,74 +347,22 @@ void run()
             "Repeated extraction leaked GDI objects");
 
     const auto icon = fixtures.root / L"\u900f\u660e-32.ico";
-    const auto custom = fixtures.root / L"\u30ab\u30b9\u30bf\u30e0";
-    write(icon, legacyIcon());
-    require(fs::create_directory(custom), "Create custom folder failed");
-    std::wstring iconPath = icon.wstring();
-    SHFOLDERCUSTOMSETTINGS settings{};
-    settings.dwSize = sizeof(settings);
-    settings.dwMask = FCSM_ICONFILE;
-    settings.pszIconFile = iconPath.data();
-    settings.cchIconFile = static_cast<DWORD>(iconPath.size() + 1);
-    settings.iIconIndex = 0;
-    check(SHGetSetFolderCustomSettings(&settings, custom.c_str(), FCS_FORCEWRITE),
-          "Set desktop.ini custom folder icon");
-    require(SetFileAttributesW(custom.c_str(), FILE_ATTRIBUTE_READONLY) != 0,
-            "Set custom folder read-only attribute failed");
-    require(fs::exists(custom / L"desktop.ini"), "Shell did not create desktop.ini");
-    {
-        std::ifstream ini(custom / L"desktop.ini", std::ios::binary);
-        std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(ini)), {});
-        std::cout << "AUTO desktop.ini bytes=" << bytes.size() << " prefix:";
-        for (std::size_t i = 0; i < std::min<std::size_t>(bytes.size(), 80); ++i)
-            std::cout << ' ' << std::hex << unsigned(bytes[i]);
-        std::cout << std::dec << " folderAttrs=" << GetFileAttributesW(custom.c_str())
-                  << " iniAttrs=" << GetFileAttributesW((custom / L"desktop.ini").c_str())
-                  << '\n';
-        wchar_t resource[1024]{};
-        const DWORD count = GetPrivateProfileStringW(L".ShellClassInfo", L"IconResource", L"",
-            resource, 1024, (custom / L"desktop.ini").c_str());
-        std::cout << "AUTO IconResource chars=" << count
-                  << " expected=" << iconPath.size() + 2 << " units:";
-        for (DWORD i = 0; i < count; ++i)
-            std::cout << ' ' << std::hex << unsigned(resource[i]);
-        std::cout << std::dec << '\n';
+    write(icon, iconFixture());
+    const auto custom = customFolder(fixtures.root / L"\u30ab\u30b9\u30bf\u30e0", icon);
+    for (int size : {32, 48, 64, 128, 256, 257}) {
+        checkFixture(load(icon, size, icons::Kind::file));
+        checkFixture(load(custom, size, icons::Kind::folder));
     }
-    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, custom.c_str(), nullptr);
-    diagnoseShellBitmap(icon, 32, "ICO");
-    diagnoseShellBitmap(custom, 32, "folder");
-    diagnoseShellBitmap(custom, 256, "folder");
-    diagnoseShellBitmap(custom, 257, "folder");
-    checkFixture(load(icon, 32, icons::Kind::file));
 
-    const auto explicitCustom = fixtures.root / L"\u30ab\u30b9\u30bf\u30e0-Unicode-INI";
-    require(fs::create_directory(explicitCustom), "Create explicit custom folder failed");
-    write(explicitCustom / L"fixture.ico", legacyIcon());
-    const std::u16string contents =
-        u"\uFEFF[.ShellClassInfo]\r\nIconResource=fixture.ico,0\r\n"
-        u"IconFile=fixture.ico\r\nIconIndex=0\r\n";
-    std::vector<unsigned char> iniBytes;
-    for (char16_t ch : contents) append16(iniBytes, ch);
-    write(explicitCustom / L"desktop.ini", iniBytes);
-    require(SetFileAttributesW((explicitCustom / L"desktop.ini").c_str(),
-            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0,
-            "Set explicit desktop.ini attributes failed");
-    require(SetFileAttributesW(explicitCustom.c_str(),
-            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM) != 0,
-            "Set explicit custom folder attributes failed");
-    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, explicitCustom.c_str(), nullptr);
-    diagnoseShellBitmap(explicitCustom, 32, "explicit folder");
-    diagnoseShellBitmap(explicitCustom, 16, "explicit folder");
-    diagnoseShellBitmap(explicitCustom, 31, "explicit folder");
-    diagnoseShellBitmap(explicitCustom, 48, "explicit folder");
-    diagnoseShellBitmap(explicitCustom, 64, "explicit folder");
-    diagnoseShellBitmap(explicitCustom, 128, "explicit folder");
-    diagnoseShellBitmap(explicitCustom, 256, "explicit folder");
-    diagnoseShellBitmap(explicitCustom, 257, "explicit folder");
-    diagnoseShellBitmap(icon, 256, "ICO");
-    checkFixture(load(explicitCustom, 32, icons::Kind::folder));
-    checkFixture(load(explicitCustom, 256, icons::Kind::folder));
-    checkFixture(load(explicitCustom, 257, icons::Kind::folder));
+    // A real 256px canvas intentionally containing only 16px of artwork must
+    // stay padded. Resource dimensions, never alpha bounds, control scaling.
+    const auto paddedIcon = fixtures.root / L"\u4f59\u767d-256.ico";
+    write(paddedIcon, iconFixture(256, 120));
+    const auto paddedFolder = customFolder(fixtures.root / L"\u4f59\u767d", paddedIcon);
+    for (int size : {256, 257}) {
+        checkPaddedFixture(load(paddedIcon, size, icons::Kind::file));
+        checkPaddedFixture(load(paddedFolder, size, icons::Kind::folder));
+    }
 }
 } // namespace
 
