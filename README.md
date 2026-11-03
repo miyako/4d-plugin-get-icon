@@ -35,7 +35,7 @@ If (Picture size($picture)=0)
 End if
 ```
 
-4D materializes an omitted declared Longint as zero. Consequently **zero also selects the 256-pixel default**; negative values fail. The pinned SDK has no parameter-presence/count accessor; no private ABI inspection is used. Sizes whose four-channel buffer exceeds `INT32_MAX` fail before native allocation (maximum arithmetic-safe side: 23170 pixels). This is a representability bound, not a practical memory guarantee: large requests can still fail allocation. Encoded PNG length must also fit the SDK's signed 32-bit length.
+4D materializes an omitted declared Longint as zero. Consequently **zero also selects the 256-pixel default**; negative values fail. The pinned SDK has no parameter-presence/count accessor; no private ABI inspection is used. Sizes whose four-channel buffer exceeds WIC's `UINT32_MAX` byte count fail before native allocation (maximum arithmetic-safe side: 32767 pixels, shared across platforms). This is a native representability bound, not a practical memory guarantee: large requests can still fail allocation. Only the encoded PNG length must fit the SDK's signed 32-bit length.
 
 Output is exactly `$size` by `$size`, independent of screen DPI/Retina scaling. The whole source icon canvas, including intentional artwork margins, is fitted into the output without cropping. Upscaling a legacy 32-pixel icon cannot invent detail or remove padding embedded in its artwork.
 
@@ -46,6 +46,8 @@ Failures (including nonexistent/deleted paths, wrong file/folder kind, allocatio
 macOS uses `NSWorkspace.iconForFile:` and a cleared 8-bit sRGB RGBA CoreGraphics bitmap at the requested dimensions, high-quality interpolation, and ImageIO PNG encoding. It does not mutate the cached `NSImage` or the current AppKit graphics context. The plugin uses `PA_RunInMainProcess` and verifies Cocoa main-thread execution before touching AppKit; it never synchronously dispatches onto the main queue.
 
 Windows resolves the actual UTF-16 path with `SHCreateItemFromParsingName` and requests `IShellItemImageFactory::GetImage` with `SIIGBF_ICONONLY | SIIGBF_SCALEUP`. Extraction/encoding uses native COM and WIC in memory, without temporary files, thumbnails, background-color flags, or GDI+ bitmap conversion.
+
+On tested Windows builds, Shell upscaling of legacy ICO resources can return an oversized canvas rather than a correctly enlarged icon. For ICO sources, native Shell icon-location metadata and WIC resource dimensions allow extraction at the original canvas size before WIC scaling. This never crops to the artwork's alpha bounds or removes intentional margins. The correction covers ICO files and ICO-backed Shell icons; arbitrary third-party Shell providers may still supply low-resolution or padded artwork.
 
 Filesystem objects are reconstructed using 4D's File/Folder constructor and `fk platform path`. The macOS backend receives the reconstructed POSIX `path`; Windows retains its Unicode `platformPath`. SDK property strings are copied before clearing their owning variables.
 

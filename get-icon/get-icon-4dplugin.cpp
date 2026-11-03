@@ -95,7 +95,7 @@ void getIcon(PA_PluginParameters params, icons::Kind kind) {
             size = 256;
         std::u16string path;
         if (!icons::validSize(size)) {
-            result.error = "Size must be positive and its RGBA buffer must fit INT32_MAX";
+            result.error = "Size must be positive and its RGBA buffer must fit WIC UINT32_MAX";
         } else if (!objectPath(PA_GetObjectParameter(params, 1), kind, path)) {
             result.error = "Cannot resolve the object's native path";
         } else {

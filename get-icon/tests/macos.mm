@@ -75,7 +75,7 @@ int main() try {
         require(!icons::load(nativePath(file), INT32_MAX, icons::Kind::file), "Overflow size accepted");
         require(!icons::load(nativePath(file), 256, icons::Kind::folder), "File accepted as folder");
         require(!icons::load(nativePath(folder), 256, icons::Kind::file), "Folder accepted as file");
-        require(!icons::validSize(23171) && icons::validSize(23170), "Wrong allocation limit");
+        require(!icons::validSize(32768) && icons::validSize(32767), "Wrong allocation limit");
 
         NSBitmapImageRep* art = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
             pixelsWide:32 pixelsHigh:32 bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES

@@ -12,7 +12,7 @@ struct Result {
     explicit operator bool() const { return !png.empty(); }
 };
 inline bool validSize(std::int32_t size) {
-    return size > 0 && std::uint64_t(size) * std::uint64_t(size) * 4 <= INT32_MAX;
+    return size > 0 && std::uint64_t(size) * std::uint64_t(size) * 4 <= UINT32_MAX;
 }
 Result load(const std::u16string& path, std::int32_t size, Kind kind);
 }
