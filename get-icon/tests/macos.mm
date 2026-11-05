@@ -130,7 +130,11 @@ int main() try {
                 options:0 error:nil], "Cannot write Finder alias");
             for (int size : {32, 128, 256}) {
                 NSBitmapImageRep* plain = decode(icons::load(nativePath(alias), size,
-                    icons::Kind::file, true), size);
+                    icons::Kind::file, icons::OverlayPolicy::noShortcut), size);
+                NSBitmapImageRep* none = decode(icons::load(nativePath(alias), size,
+                    icons::Kind::file, icons::OverlayPolicy::none), size);
+                require(raster(none.CGImage) == raster(plain.CGImage),
+                        "No-overlays policy did not suppress the Finder alias arrow");
                 NSBitmapImageRep* expected = decode(icons::load(nativePath(target), size,
                     [target isEqual:file] ? icons::Kind::file : icons::Kind::folder), size);
                 require(raster(plain.CGImage) == raster(expected.CGImage),

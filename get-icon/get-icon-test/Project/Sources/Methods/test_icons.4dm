@@ -7,6 +7,7 @@ var $target; $alias : Object
 var $variants : Collection
 var $default : Text
 ASSERT(Icon No shortcut arrow=1; "Shortcut suppression constant must be Longint 1")
+ASSERT(Icon No overlays=2; "All-overlay suppression constant must be Longint 2")
 $folder:=Folder(fk database folder)
 $file:=File(Folder(fk resources folder).path+"icon-test-日本語.txt")
 $file.setText("icon fixture")
@@ -48,28 +49,29 @@ For each ($target; [$file; $folder])
         PICTURE TO BLOB($picture; $blob; ".png")
         $default:=Generate digest($blob; SHA256 digest)
         $variants:=New collection
-        For each ($i; [0; Icon No shortcut arrow; 2])
+        For each ($i; [0; Icon No shortcut arrow; Icon No overlays; 99])
             $picture:=File Get icon($alias; $size; $i)
             ASSERT(Picture size($picture)>0; "Explicit shortcut option")
             PICTURE TO BLOB($picture; $blob; ".png")
             $variants.push(Generate digest($blob; SHA256 digest))
         End for each
-        ASSERT(($variants[0]=$default) & ($variants[2]=$default); "Only option 1 suppresses the arrow")
+        ASSERT(($variants[0]=$default) & ($variants[3]=$default); "Zero and unknown options preserve default overlays")
+        ASSERT($variants[1]=$variants[2]; "Both suppression options remove the shortcut arrow")
         ASSERT($variants[1]#$default; "Default shortcut arrow must change the picture")
     End for each
     $alias.delete()
 End for each
 
-For each ($i; [0; Icon No shortcut arrow; 2])
+For each ($i; [0; Icon No shortcut arrow; Icon No overlays; 99])
     $picture:=File Get icon($file; 128; $i)
-    ASSERT(Picture size($picture)>0; "Optional shortcut flag must accept ordinary files")
+    ASSERT(Picture size($picture)>0; "Overlay policies must accept ordinary files")
     PICTURE TO BLOB($picture; $blob; ".png")
     $offset:=16
     $width:=BLOB to longint($blob; Macintosh byte ordering; $offset)
     $height:=BLOB to longint($blob; Macintosh byte ordering; $offset)
     ASSERT(($width=128) & ($height=128); "Shortcut flag preserves requested dimensions")
     $picture:=Folder Get icon($folder; 0; $i)
-    ASSERT(Picture size($picture)>0; "Optional shortcut flag must accept ordinary folders")
+    ASSERT(Picture size($picture)>0; "Overlay policies must accept ordinary folders")
     PICTURE TO BLOB($picture; $blob; ".png")
     $offset:=16
     $width:=BLOB to longint($blob; Macintosh byte ordering; $offset)

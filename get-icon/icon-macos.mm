@@ -12,12 +12,15 @@ template<typename T> struct Owned {
 };
 }
 
-Result load(const std::u16string& path, std::int32_t size, Kind kind, bool hideShortcut) {
+Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPolicy overlays) {
     @autoreleasepool {
         if (![NSThread isMainThread])
             return {{}, "AppKit extraction requires the Cocoa main thread"};
         if (!validSize(size))
             return {{}, "Invalid image size"};
+        if (overlays != OverlayPolicy::system && overlays != OverlayPolicy::noShortcut &&
+            overlays != OverlayPolicy::none)
+            return {{}, "Invalid icon overlay policy"};
         if (path.empty() || path.find(u'\0') != std::u16string::npos)
             return {{}, "Invalid path"};
         NSString* file = [[NSString alloc] initWithCharacters:
@@ -26,7 +29,7 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, bool hideS
         if (![[NSFileManager defaultManager] fileExistsAtPath:file isDirectory:&directory] ||
             bool(directory) != (kind == Kind::folder))
             return {{}, "Path is missing or has the wrong file/folder kind"};
-        if (hideShortcut) {
+        if (overlays != OverlayPolicy::system) {
             NSURL* url = [NSURL fileURLWithPath:file];
             NSNumber* alias = nil;
             NSError* error = nil;

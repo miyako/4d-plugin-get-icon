@@ -72,7 +72,7 @@ struct Request {
     const std::u16string& path;
     std::int32_t size;
     icons::Kind kind;
-    bool hideShortcut;
+    icons::OverlayPolicy overlays;
     icons::Result result;
 };
 
@@ -80,7 +80,7 @@ void nativeLoad(void* context) {
     auto& request = *static_cast<Request*>(context);
     try {
         request.result = icons::load(request.path, request.size, request.kind,
-                                     request.hideShortcut);
+                                     request.overlays);
     } catch (const std::bad_alloc&) {
         request.result.error = "Out of memory";
     } catch (const std::length_error&) {
@@ -93,7 +93,10 @@ void getIcon(PA_PluginParameters params, icons::Kind kind) {
     try {
         // 4D materializes omitted declared Longint parameters as zero.
         PA_long32 size = PA_GetLongParameter(params, 2);
-        const bool hideShortcut = PA_GetLongParameter(params, 3) == 1;
+        const PA_long32 option = PA_GetLongParameter(params, 3);
+        const auto overlays = option == 1 ? icons::OverlayPolicy::noShortcut :
+                              option == 2 ? icons::OverlayPolicy::none :
+                                            icons::OverlayPolicy::system;
         if (size == 0)
             size = 256;
         std::u16string path;
@@ -102,7 +105,7 @@ void getIcon(PA_PluginParameters params, icons::Kind kind) {
         } else if (!objectPath(PA_GetObjectParameter(params, 1), kind, path)) {
             result.error = "Cannot resolve the object's native path";
         } else {
-            Request request{path, size, kind, hideShortcut,
+            Request request{path, size, kind, overlays,
                             {{}, "Native icon extraction did not run"}};
 #ifdef __APPLE__
             // Ask 4D to switch context, never synchronously dispatch onto Cocoa.

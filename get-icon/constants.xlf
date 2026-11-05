@@ -12,5 +12,8 @@
         <trans-unit d4:value="1:L" id="1">
             <source>Icon No shortcut arrow</source>
         </trans-unit>
+        <trans-unit d4:value="2:L" id="2">
+            <source>Icon No overlays</source>
+        </trans-unit>
     </group>
 </xliff>

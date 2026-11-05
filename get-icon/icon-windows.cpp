@@ -54,11 +54,9 @@ struct DestroyIcon {
 };
 using Icon = std::unique_ptr<std::remove_pointer_t<HICON>, DestroyIcon>;
 
-HRESULT shortcutOverlay(IShellItem* item, const std::wstring& path, Icon& overlay)
+HRESULT shellOverlay(const std::wstring& path, OverlayPolicy policy, Icon& overlay)
 {
-    SFGAOF attributes = 0;
-    HRESULT hr = item->GetAttributes(SFGAO_LINK, &attributes);
-    if (FAILED(hr) || !(attributes & SFGAO_LINK)) return hr;
+    if (policy == OverlayPolicy::none) return S_OK;
     SHFILEINFOW info{};
     if (!SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info),
                        SHGFI_ICON | SHGFI_ADDOVERLAYS | SHGFI_OVERLAYINDEX))
@@ -67,8 +65,15 @@ HRESULT shortcutOverlay(IShellItem* item, const std::wstring& path, Icon& overla
     const unsigned index = static_cast<unsigned>(info.iIcon) >> 24;
     // Respect the user's Shell configuration, including disabled link badges.
     if (!index) return S_OK;
+    if (policy == OverlayPolicy::noShortcut) {
+        const int shortcut = SHGetIconOverlayIndexW(nullptr, IDO_SHGIOI_LINK);
+        if (shortcut < 0) return E_FAIL;
+        // A link may have a different Shell-selected status badge. Suppress
+        // the shortcut overlay itself, not every overlay on a shortcut file.
+        if (index == static_cast<unsigned>(shortcut)) return S_OK;
+    }
     ComPtr<IImageList> images;
-    hr = SHGetImageList(SHIL_LARGE, IID_PPV_ARGS(images.GetAddressOf()));
+    HRESULT hr = SHGetImageList(SHIL_LARGE, IID_PPV_ARGS(images.GetAddressOf()));
     if (FAILED(hr)) return hr;
     int image = 0;
     hr = images->GetOverlayImage(index, &image);
@@ -432,7 +437,7 @@ Result encode(IWICImagingFactory* wic, HBITMAP handle, UINT size, HICON overlay)
     return result;
 }
 
-Result extract(const std::u16string& path, std::int32_t size, Kind kind, bool hideShortcut)
+Result extract(const std::u16string& path, std::int32_t size, Kind kind, OverlayPolicy overlays)
 {
     Apartment apartment;
     if (apartment.status == RPC_E_CHANGED_MODE)
@@ -484,28 +489,29 @@ Result extract(const std::u16string& path, std::int32_t size, Kind kind, bool hi
         bitmap = std::move(native);
     }
     Icon overlay;
-    if (!hideShortcut) {
-        hr = shortcutOverlay(item.Get(), nativePath, overlay);
-        if (FAILED(hr)) return failure("Read Shell shortcut overlay", hr);
-    }
+    hr = shellOverlay(nativePath, overlays, overlay);
+    if (FAILED(hr)) return failure("Read Shell icon overlay", hr);
     return encode(wic.Get(), bitmap.get(), static_cast<UINT>(size), overlay.get());
 }
 } // namespace
 
-Result load(const std::u16string& path, std::int32_t size, Kind kind, bool hideShortcut)
+Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPolicy overlays)
 {
     if (!validSize(size)) return {{}, "Invalid icon size"};
     if (path.empty() || path.find(u'\0') != std::u16string::npos)
         return {{}, "Path must be nonempty and contain no embedded NUL"};
     if (kind != Kind::file && kind != Kind::folder)
         return {{}, "Invalid icon kind"};
+    if (overlays != OverlayPolicy::system && overlays != OverlayPolicy::noShortcut &&
+        overlays != OverlayPolicy::none)
+        return {{}, "Invalid icon overlay policy"};
     try {
         Result result;
         // All Shell and WIC objects are created/released on this dedicated STA.
         // The caller's COM state (including an existing MTA) is left untouched.
         std::thread worker([&] {
             try {
-                result = extract(path, size, kind, hideShortcut);
+                result = extract(path, size, kind, overlays);
             } catch (const std::bad_alloc&) {
                 result = {{}, "Insufficient memory while extracting icon"};
             } catch (const std::length_error&) {

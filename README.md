@@ -1,5 +1,7 @@
 # get-icon
 
+[English](README.md) | [日本語](README.ja.md)
+
 A native 4D plugin returning file and folder icons as **PNG-backed Pictures with alpha**, on macOS and Windows. Uses Finder/Windows Shell icon resolution, including OS-recognized custom file and folder icons. Does not generate thumbnails or parse custom-icon metadata itself.
 
 ## Requirements
@@ -21,7 +23,7 @@ Manifest signatures: `File Get icon(&J;&L;&L):P` and `Folder Get icon(&J;&L;&L):
 |---|---|---|
 | `$file` / `$folder` | Object | Existing `4D.File` / `4D.Folder` |
 | `$size` | Integer | Square output size in physical pixels; optional, defaults to **256** |
-| `$options` | Integer | Optional; **Icon No shortcut arrow** (**1**) suppresses the shortcut arrow. Omitted, **0**, or any other value keeps the native shortcut badge |
+| `$options` | Integer | Optional overlay policy; see constants below. Omitted, **0**, or an unrecognized value uses the system-selected overlay |
 | `$picture` | Picture | Encoded PNG on success; genuinely empty Picture on failure |
 
 ```4d
@@ -33,6 +35,8 @@ $folder:=Folder(fk database folder)
 $picture:=Folder Get icon($folder; 128)
 // For a Windows .lnk file or macOS Finder alias:
 // $picture:=File Get icon($shortcut; 256; Icon No shortcut arrow)
+// Omit all supported overlays, including non-shortcut Shell status badges:
+// $picture:=File Get icon($file; 256; Icon No overlays)
 If (Picture size($picture)=0)
     // Missing path, invalid size, or native extraction/encoding failure
 End if
@@ -42,23 +46,30 @@ End if
 
 Output is exactly `$size` by `$size`, independent of screen DPI/Retina scaling. The whole source icon canvas, including intentional artwork margins, is fitted proportionally into the output without cropping. Smaller bitmaps are enlarged with nearest-neighbor sampling, preserving crisp pixel blocks rather than smoothing them: 32×32 to 128×128 gives 4×4 blocks; 32×32 to 256×256 gives 8×8 blocks. Downscaling retains high-quality filtering. Upscaling cannot invent detail or remove padding embedded in the artwork.
 
-Shortcut arrows are included by default. Pass a Windows `.lnk` file or macOS Finder alias to **File Get icon**, even when it points to a folder. On Windows, the Shell's configured shortcut overlay is composited over the icon; option **1** omits it without changing the shortcut's custom icon. On macOS, the default keeps Finder's alias icon; option **1** resolves the alias and uses its target's icon (and fails explicitly if the target cannot be resolved).
+**Windows:** the Shell-selected overlay is included by default for both files and folders, not just shortcuts. This can include shortcut arrows, version-control status, synchronization status, or sharing/access badges when Windows or an installed Shell extension exposes them through the classic overlay mechanism. Windows chooses one overlay; the plugin does not stack competing badges or invent priorities. Availability depends on the Windows version, installed handlers, configuration, and available system overlay slots. Modern cloud-status indicators and UAC shields are not necessarily exposed this way, and there is no generic badge for a file currently open/locked by another process.
+
+`Icon No shortcut arrow` (**1**) suppresses only the system shortcut overlay, retaining an unrelated Shell-selected badge even on a shortcut. `Icon No overlays` (**2**) skips all separately composited Shell overlays. Neither option removes decorations already embedded in the base icon artwork. These are mutually exclusive policies, not combinable bit flags; unrecognized values retain the default policy.
+
+**macOS:** the default keeps Finder's native icon. Both suppression options resolve Finder aliases and use their target's icon (failing explicitly if the target cannot be resolved). Finder Sync extension badges, cloud status, and lock decorations are not supported separately by the current `NSWorkspace` backend.
+
+Pass a Windows `.lnk` file or macOS Finder alias to **File Get icon**, even when it points to a folder.
 
 Failures (including nonexistent/deleted paths, wrong file/folder kind, allocation or encoding errors) return `PA_CreatePicture(nullptr, 0)`, not a transparent PNG. The plugin logs a diagnostic to standard error. Returned pictures belong to 4D.
 
 ## Constants
 
-The **Icon options** theme exposes the following plugin constant through `constants.xlf`:
+The **Icon options** theme exposes the following plugin constants through `constants.xlf`:
 
 | Constant | Type | Value | Meaning |
 |---|---|---|---|
-| `Icon No shortcut arrow` | Longint | 1 | Suppress the shortcut arrow |
+| `Icon No shortcut arrow` | Longint | 1 | Suppress only the shortcut arrow; retain other Windows Shell overlays |
+| `Icon No overlays` | Longint | 2 | Suppress all separately composited Windows Shell overlays; suppress Finder alias arrows on macOS |
 
 ## Native implementation
 
 macOS uses `NSWorkspace.iconForFile:` and a cleared 8-bit sRGB RGBA CoreGraphics bitmap at the requested dimensions, nearest-neighbor enlargement/high-quality reduction, and ImageIO PNG encoding. It does not mutate the cached `NSImage` or the current AppKit graphics context. The plugin uses `PA_RunInMainProcess` and verifies Cocoa main-thread execution before touching AppKit; it never synchronously dispatches onto the main queue.
 
-Windows resolves the actual UTF-16 path with `SHCreateItemFromParsingName` and requests `IShellItemImageFactory::GetImage` with `SIIGBF_ICONONLY`, leaving enlargement to WIC rather than Shell interpolation. Shell link attributes and the system image list supply the configured shortcut overlay, composited with alpha after sizing the base icon. Extraction/encoding uses native COM and WIC in memory, without temporary files, thumbnails, background-color flags, or GDI+ bitmap conversion.
+Windows resolves the actual UTF-16 path with `SHCreateItemFromParsingName` and requests `IShellItemImageFactory::GetImage` with `SIIGBF_ICONONLY`, leaving enlargement to WIC rather than Shell interpolation. `SHGetFileInfoW` with `SHGFI_ADDOVERLAYS | SHGFI_OVERLAYINDEX` supplies the Shell-selected overlay for any item. The system image list supplies its pixels, composited with alpha after sizing the base icon. Shortcut-only suppression compares the selected overlay index with `SHGetIconOverlayIndexW`'s standard link overlay, rather than suppressing every badge on a link. Extraction/encoding uses native COM and WIC in memory, without temporary files, thumbnails, background-color flags, or GDI+ bitmap conversion.
 
 On tested Windows builds, Shell extraction of legacy icons can return an oversized canvas rather than a correctly enlarged icon, even without `SIIGBF_SCALEUP`. Native Shell icon-location metadata, WIC ICO dimensions, and EXE/DLL group-icon resource dimensions allow extraction at the original canvas size before WIC scaling. Executable resources are loaded only as data, never executed; shortcut icon locations and targets are read without launching them. This never crops to the artwork's alpha bounds or removes intentional margins. The correction covers ICO files, ICO-backed Shell icons, embedded executable icons, and shortcuts using those sources; arbitrary third-party Shell providers may still supply low-resolution or padded artwork.
 
@@ -86,7 +97,7 @@ The manifest uses a project-local ID (`31071`), not a claim of a registered prod
 
 ## Tests and CI
 
-Native tests exercise pixel dimensions, PNG alpha, Unicode paths, custom icons, legacy source artwork, shortcut arrows and suppression, invalid inputs, and repeated extraction. Windows regressions check exact 4×4/8×8 source-pixel replication and lower-left shortcut compositing for links to files and folders. The tutorial-derived 4D test project exercises both commands, the optional shortcut flag, default sizing, decoded PNG dimensions, repeated calls, and `Picture size(...)=0` on failures.
+Native tests exercise pixel dimensions, PNG alpha, Unicode paths, custom icons, legacy source artwork, overlay policies, invalid inputs, and repeated extraction. Windows regressions compare overlay policies with live Shell selection for ordinary files, folders, and shortcuts, and check exact 4×4/8×8 source-pixel replication and lower-left shortcut compositing for links to files and folders. Third-party status overlays require their provider to be installed; tests do not install handlers or change system associations. The tutorial-derived 4D test project exercises both commands, both named overlay constants, unrecognized-option defaults, default sizing, decoded PNG dimensions, repeated calls, and `Picture size(...)=0` on failures.
 
 Run the integration suite with a matching [tool4d](https://developer.4d.com/docs/Admin/cli/) runtime (no license required):
 

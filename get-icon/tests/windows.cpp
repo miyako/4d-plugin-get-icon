@@ -6,6 +6,7 @@
 #include "../icon.h"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <wincodec.h>
 #include <wrl/client.h>
@@ -20,6 +21,7 @@
 
 namespace {
 using Microsoft::WRL::ComPtr;
+using icons::OverlayPolicy;
 namespace fs = std::filesystem;
 
 void require(bool condition, const char* message)
@@ -184,9 +186,10 @@ Image decode(const icons::Result& result)
     return image;
 }
 
-Image load(const fs::path& path, int size, icons::Kind kind, bool hideShortcut = false)
+Image load(const fs::path& path, int size, icons::Kind kind,
+           OverlayPolicy overlays = OverlayPolicy::system)
 {
-    Image image = decode(icons::load(path.u16string(), size, kind, hideShortcut));
+    Image image = decode(icons::load(path.u16string(), size, kind, overlays));
     require(image.width == static_cast<UINT>(size) && image.height == static_cast<UINT>(size),
             "PNG dimensions do not exactly match the requested size");
     bool visible = false;
@@ -194,6 +197,26 @@ Image load(const fs::path& path, int size, icons::Kind kind, bool hideShortcut =
         visible |= image.rgba[i] != 0;
     require(visible, "Icon is completely transparent");
     return image;
+}
+
+void checkShellOverlay(const fs::path& path, icons::Kind kind)
+{
+    SHFILEINFOW info{};
+    require(SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info),
+                SHGFI_ICON | SHGFI_ADDOVERLAYS | SHGFI_OVERLAYINDEX) != 0,
+            "Cannot query reference Shell overlay");
+    if (info.hIcon) DestroyIcon(info.hIcon);
+    const unsigned selected = static_cast<unsigned>(info.iIcon) >> 24;
+    const auto normal = load(path, 128, kind);
+    const auto noShortcut = load(path, 128, kind, OverlayPolicy::noShortcut);
+    const auto none = load(path, 128, kind, OverlayPolicy::none);
+    require((normal.rgba != none.rgba) == (selected != 0),
+            "Default policy did not match the Shell-selected overlay");
+    const int shortcut = SHGetIconOverlayIndexW(nullptr, IDO_SHGIOI_LINK);
+    require(shortcut >= 0, "Cannot query reference shortcut overlay");
+    require(noShortcut.rgba == (selected == static_cast<unsigned>(shortcut)
+                ? none.rgba : normal.rgba),
+            "Shortcut suppression removed an unrelated badge or retained the arrow");
 }
 
 void reject(const std::u16string& path, int size, icons::Kind kind)
@@ -346,6 +369,12 @@ void run()
     const auto folder = fixtures.root / L"\u30d5\u30a9\u30eb\u30c0";
     write(file, {'t', 'e', 's', 't'});
     require(fs::create_directory(folder), "Create Unicode folder failed");
+    checkShellOverlay(file, icons::Kind::file);
+    checkShellOverlay(folder, icons::Kind::folder);
+    const auto invalidPolicy = icons::load(file.u16string(), 32, icons::Kind::file,
+                                          static_cast<OverlayPolicy>(99));
+    require(!invalidPolicy && invalidPolicy.png.empty() && !invalidPolicy.error.empty(),
+            "Invalid overlay policy did not fail explicitly");
 
     // Check representability only; do not allocate near-limit pixel buffers.
     require(!icons::validSize(-1) && !icons::validSize(0) &&
@@ -425,17 +454,22 @@ void run()
             checkFixture(enlarged);
             checkEnlarged(source, enlarged);
         }
-        require(load(target, 256, kind).rgba == load(target, 256, kind, true).rgba,
+        require(load(target, 256, kind).rgba ==
+                    load(target, 256, kind, OverlayPolicy::noShortcut).rgba,
                 "Suppressing shortcut arrows changed a non-shortcut");
+        checkShellOverlay(target, kind);
     }
 
     for (const auto& target : {file, folder, executable}) {
         const auto link = fixtures.root / (target.filename().wstring() + L".lnk");
         const auto& resource = target == executable ? executable : icon;
         shortcut(link, target, resource, target == executable ? -1 : 0);
+        checkShellOverlay(link, icons::Kind::file);
         for (int size : {32, 128, 256}) {
-            const auto plain = load(link, size, icons::Kind::file, true);
+            const auto plain = load(link, size, icons::Kind::file, OverlayPolicy::noShortcut);
             const auto decorated = load(link, size, icons::Kind::file);
+            require(load(link, size, icons::Kind::file, OverlayPolicy::none).rgba == plain.rgba,
+                    "No-overlays policy did not remove the shortcut arrow");
             require(plain.rgba == load(resource, size, icons::Kind::file).rgba,
                     "Suppressed shortcut did not preserve its custom icon");
             unsigned changed = 0;
@@ -453,15 +487,15 @@ void run()
                 }
             require(changed > 0, "Shortcut arrow is missing by default");
         }
-        checkEnlarged(load(link, 32, icons::Kind::file, true),
-                      load(link, 256, icons::Kind::file, true));
+        checkEnlarged(load(link, 32, icons::Kind::file, OverlayPolicy::noShortcut),
+                      load(link, 256, icons::Kind::file, OverlayPolicy::noShortcut));
     }
     const auto defaultLink = fixtures.root / L"default-executable.lnk";
     shortcut(defaultLink, executable, {});
     checkEnlarged(load(executable, 32, icons::Kind::file),
-                  load(defaultLink, 256, icons::Kind::file, true));
+                  load(defaultLink, 256, icons::Kind::file, OverlayPolicy::noShortcut));
     require(load(defaultLink, 256, icons::Kind::file).rgba !=
-                load(defaultLink, 256, icons::Kind::file, true).rgba,
+                load(defaultLink, 256, icons::Kind::file, OverlayPolicy::noShortcut).rgba,
             "Default executable shortcut is missing its arrow");
 
     // A real 256px canvas intentionally containing only 16px of artwork must
