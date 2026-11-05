@@ -3,6 +3,10 @@ var $folder; $file; $missing : Object
 var $picture : Picture
 var $width; $height; $offset; $size; $i : Integer
 var $blob : Blob
+var $target; $alias : Object
+var $variants : Collection
+var $default : Text
+ASSERT(Icon No shortcut arrow=1; "Shortcut suppression constant must be Longint 1")
 $folder:=Folder(fk database folder)
 $file:=File(Folder(fk resources folder).path+"icon-test-日本語.txt")
 $file.setText("icon fixture")
@@ -33,6 +37,44 @@ For each ($size; [1; 31; 32; 127; 256])
     $width:=BLOB to longint($blob; Macintosh byte ordering; $offset)
     $height:=BLOB to longint($blob; Macintosh byte ordering; $offset)
     ASSERT(($width=$size) & ($height=$size); "Exact folder PNG dimensions")
+End for each
+
+For each ($target; [$file; $folder])
+    $alias:=$target.createAlias(Folder(fk resources folder); "icon-test-shortcut-"+Generate UUID+".lnk")
+    ASSERT($alias.isAlias; "Shortcut fixture must be a native alias")
+    For each ($size; [32; 128; 256])
+        $picture:=File Get icon($alias; $size)
+        ASSERT(Picture size($picture)>0; "Default shortcut icon")
+        PICTURE TO BLOB($picture; $blob; ".png")
+        $default:=Generate digest($blob; SHA256 digest)
+        $variants:=New collection
+        For each ($i; [0; Icon No shortcut arrow; 2])
+            $picture:=File Get icon($alias; $size; $i)
+            ASSERT(Picture size($picture)>0; "Explicit shortcut option")
+            PICTURE TO BLOB($picture; $blob; ".png")
+            $variants.push(Generate digest($blob; SHA256 digest))
+        End for each
+        ASSERT(($variants[0]=$default) & ($variants[2]=$default); "Only option 1 suppresses the arrow")
+        ASSERT($variants[1]#$default; "Default shortcut arrow must change the picture")
+    End for each
+    $alias.delete()
+End for each
+
+For each ($i; [0; Icon No shortcut arrow; 2])
+    $picture:=File Get icon($file; 128; $i)
+    ASSERT(Picture size($picture)>0; "Optional shortcut flag must accept ordinary files")
+    PICTURE TO BLOB($picture; $blob; ".png")
+    $offset:=16
+    $width:=BLOB to longint($blob; Macintosh byte ordering; $offset)
+    $height:=BLOB to longint($blob; Macintosh byte ordering; $offset)
+    ASSERT(($width=128) & ($height=128); "Shortcut flag preserves requested dimensions")
+    $picture:=Folder Get icon($folder; 0; $i)
+    ASSERT(Picture size($picture)>0; "Optional shortcut flag must accept ordinary folders")
+    PICTURE TO BLOB($picture; $blob; ".png")
+    $offset:=16
+    $width:=BLOB to longint($blob; Macintosh byte ordering; $offset)
+    $height:=BLOB to longint($blob; Macintosh byte ordering; $offset)
+    ASSERT(($width=256) & ($height=256); "Shortcut flag preserves zero/default size")
 End for each
 
 $picture:=Folder Get icon($folder)

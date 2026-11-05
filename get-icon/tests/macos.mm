@@ -45,7 +45,9 @@ static std::vector<unsigned char> raster(CGImageRef image) {
     CGContextRef context = CGBitmapContextCreate(rgba.data(), 256, 256, 8, 1024, space,
         CGBitmapInfo(kCGImageAlphaPremultipliedLast) | kCGBitmapByteOrder32Big);
     require(context, "Cannot render reference");
-    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+    CGContextSetInterpolationQuality(context,
+        CGImageGetWidth(image) < 256 && CGImageGetHeight(image) < 256
+            ? kCGInterpolationNone : kCGInterpolationHigh);
     CGContextDrawImage(context, CGRectMake(0, 0, 256, 256), image);
     CGContextRelease(context);
     CGColorSpaceRelease(space);
@@ -116,6 +118,28 @@ int main() try {
             for (int i = 0; i < 50; ++i)
                 decode(icons::load(nativePath(target), 32, [target isEqual:file]
                     ? icons::Kind::file : icons::Kind::folder), 32);
+        }
+        for (NSString* target in @[file, folder]) {
+            NSURL* targetURL = [NSURL fileURLWithPath:target];
+            NSData* bookmark = [targetURL bookmarkDataWithOptions:
+                NSURLBookmarkCreationSuitableForBookmarkFile
+                includingResourceValuesForKeys:nil relativeToURL:nil error:nil];
+            require(bookmark != nil, "Cannot create alias bookmark");
+            NSString* alias = [target stringByAppendingString:@".alias"];
+            require([NSURL writeBookmarkData:bookmark toURL:[NSURL fileURLWithPath:alias]
+                options:0 error:nil], "Cannot write Finder alias");
+            for (int size : {32, 128, 256}) {
+                NSBitmapImageRep* plain = decode(icons::load(nativePath(alias), size,
+                    icons::Kind::file, true), size);
+                NSBitmapImageRep* expected = decode(icons::load(nativePath(target), size,
+                    [target isEqual:file] ? icons::Kind::file : icons::Kind::folder), size);
+                require(raster(plain.CGImage) == raster(expected.CGImage),
+                        "Suppressed Finder alias does not match target icon");
+                NSBitmapImageRep* decorated = decode(icons::load(nativePath(alias), size,
+                    icons::Kind::file), size);
+                require(raster(decorated.CGImage) != raster(plain.CGImage),
+                        "Finder alias arrow is missing by default");
+            }
         }
         bool rejected = false;
         std::thread worker([&] {

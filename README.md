@@ -11,16 +11,17 @@ A native 4D plugin returning file and folder icons as **PNG-backed Pictures with
 ## Commands
 
 ```4d
-$picture:=File Get icon($file {; $size})
-$picture:=Folder Get icon($folder {; $size})
+$picture:=File Get icon($file {; $size {; $options}})
+$picture:=Folder Get icon($folder {; $size {; $options}})
 ```
 
-Manifest signatures: `File Get icon(&J;&L):P` and `Folder Get icon(&J;&L):P`.
+Manifest signatures: `File Get icon(&J;&L;&L):P` and `Folder Get icon(&J;&L;&L):P`.
 
 | Parameter | Type | Meaning |
 |---|---|---|
 | `$file` / `$folder` | Object | Existing `4D.File` / `4D.Folder` |
 | `$size` | Integer | Square output size in physical pixels; optional, defaults to **256** |
+| `$options` | Integer | Optional; **Icon No shortcut arrow** (**1**) suppresses the shortcut arrow. Omitted, **0**, or any other value keeps the native shortcut badge |
 | `$picture` | Picture | Encoded PNG on success; genuinely empty Picture on failure |
 
 ```4d
@@ -30,6 +31,8 @@ $file:=File("/LOGS/report.pdf")
 $picture:=File Get icon($file)
 $folder:=Folder(fk database folder)
 $picture:=Folder Get icon($folder; 128)
+// For a Windows .lnk file or macOS Finder alias:
+// $picture:=File Get icon($shortcut; 256; Icon No shortcut arrow)
 If (Picture size($picture)=0)
     // Missing path, invalid size, or native extraction/encoding failure
 End if
@@ -37,17 +40,27 @@ End if
 
 4D materializes an omitted declared Longint as zero. Consequently **zero also selects the 256-pixel default**; negative values fail. The pinned SDK has no parameter-presence/count accessor; no private ABI inspection is used. Sizes whose four-channel buffer exceeds WIC's `UINT32_MAX` byte count fail before native allocation (maximum arithmetic-safe side: 32767 pixels, shared across platforms). This is a native representability bound, not a practical memory guarantee: large requests can still fail allocation. Only the encoded PNG length must fit the SDK's signed 32-bit length.
 
-Output is exactly `$size` by `$size`, independent of screen DPI/Retina scaling. The whole source icon canvas, including intentional artwork margins, is fitted into the output without cropping. Upscaling a legacy 32-pixel icon cannot invent detail or remove padding embedded in its artwork.
+Output is exactly `$size` by `$size`, independent of screen DPI/Retina scaling. The whole source icon canvas, including intentional artwork margins, is fitted proportionally into the output without cropping. Smaller bitmaps are enlarged with nearest-neighbor sampling, preserving crisp pixel blocks rather than smoothing them: 32×32 to 128×128 gives 4×4 blocks; 32×32 to 256×256 gives 8×8 blocks. Downscaling retains high-quality filtering. Upscaling cannot invent detail or remove padding embedded in the artwork.
+
+Shortcut arrows are included by default. Pass a Windows `.lnk` file or macOS Finder alias to **File Get icon**, even when it points to a folder. On Windows, the Shell's configured shortcut overlay is composited over the icon; option **1** omits it without changing the shortcut's custom icon. On macOS, the default keeps Finder's alias icon; option **1** resolves the alias and uses its target's icon (and fails explicitly if the target cannot be resolved).
 
 Failures (including nonexistent/deleted paths, wrong file/folder kind, allocation or encoding errors) return `PA_CreatePicture(nullptr, 0)`, not a transparent PNG. The plugin logs a diagnostic to standard error. Returned pictures belong to 4D.
 
+## Constants
+
+The **Icon options** theme exposes the following plugin constant through `constants.xlf`:
+
+| Constant | Type | Value | Meaning |
+|---|---|---|---|
+| `Icon No shortcut arrow` | Longint | 1 | Suppress the shortcut arrow |
+
 ## Native implementation
 
-macOS uses `NSWorkspace.iconForFile:` and a cleared 8-bit sRGB RGBA CoreGraphics bitmap at the requested dimensions, high-quality interpolation, and ImageIO PNG encoding. It does not mutate the cached `NSImage` or the current AppKit graphics context. The plugin uses `PA_RunInMainProcess` and verifies Cocoa main-thread execution before touching AppKit; it never synchronously dispatches onto the main queue.
+macOS uses `NSWorkspace.iconForFile:` and a cleared 8-bit sRGB RGBA CoreGraphics bitmap at the requested dimensions, nearest-neighbor enlargement/high-quality reduction, and ImageIO PNG encoding. It does not mutate the cached `NSImage` or the current AppKit graphics context. The plugin uses `PA_RunInMainProcess` and verifies Cocoa main-thread execution before touching AppKit; it never synchronously dispatches onto the main queue.
 
-Windows resolves the actual UTF-16 path with `SHCreateItemFromParsingName` and requests `IShellItemImageFactory::GetImage` with `SIIGBF_ICONONLY | SIIGBF_SCALEUP`. Extraction/encoding uses native COM and WIC in memory, without temporary files, thumbnails, background-color flags, or GDI+ bitmap conversion.
+Windows resolves the actual UTF-16 path with `SHCreateItemFromParsingName` and requests `IShellItemImageFactory::GetImage` with `SIIGBF_ICONONLY`, leaving enlargement to WIC rather than Shell interpolation. Shell link attributes and the system image list supply the configured shortcut overlay, composited with alpha after sizing the base icon. Extraction/encoding uses native COM and WIC in memory, without temporary files, thumbnails, background-color flags, or GDI+ bitmap conversion.
 
-On tested Windows builds, Shell upscaling of legacy ICO resources can return an oversized canvas rather than a correctly enlarged icon. For ICO sources, native Shell icon-location metadata and WIC resource dimensions allow extraction at the original canvas size before WIC scaling. This never crops to the artwork's alpha bounds or removes intentional margins. The correction covers ICO files and ICO-backed Shell icons; arbitrary third-party Shell providers may still supply low-resolution or padded artwork.
+On tested Windows builds, Shell extraction of legacy icons can return an oversized canvas rather than a correctly enlarged icon, even without `SIIGBF_SCALEUP`. Native Shell icon-location metadata, WIC ICO dimensions, and EXE/DLL group-icon resource dimensions allow extraction at the original canvas size before WIC scaling. Executable resources are loaded only as data, never executed; shortcut icon locations and targets are read without launching them. This never crops to the artwork's alpha bounds or removes intentional margins. The correction covers ICO files, ICO-backed Shell icons, embedded executable icons, and shortcuts using those sources; arbitrary third-party Shell providers may still supply low-resolution or padded artwork.
 
 Filesystem objects are reconstructed using 4D's File/Folder constructor and `fk platform path`. The macOS backend receives the reconstructed POSIX `path`; Windows retains its Unicode `platformPath`. SDK property strings are copied before clearing their owning variables.
 
@@ -73,7 +86,7 @@ The manifest uses a project-local ID (`31071`), not a claim of a registered prod
 
 ## Tests and CI
 
-Native tests exercise pixel dimensions, PNG alpha, Unicode paths, custom icons, legacy source artwork, invalid inputs, and repeated extraction. The tutorial-derived 4D test project exercises both commands, default sizing, decoded PNG dimensions, repeated calls, and `Picture size(...)=0` on failures.
+Native tests exercise pixel dimensions, PNG alpha, Unicode paths, custom icons, legacy source artwork, shortcut arrows and suppression, invalid inputs, and repeated extraction. Windows regressions check exact 4×4/8×8 source-pixel replication and lower-left shortcut compositing for links to files and folders. The tutorial-derived 4D test project exercises both commands, the optional shortcut flag, default sizing, decoded PNG dimensions, repeated calls, and `Picture size(...)=0` on failures.
 
 Run the integration suite with a matching [tool4d](https://developer.4d.com/docs/Admin/cli/) runtime (no license required):
 
@@ -103,6 +116,7 @@ get-icon.bundle/
     MacOS/get-icon
     Windows64/get-icon.4DX
     Resources/manifest.json
+    Resources/constants.xlf
 ```
 
 The packaging and verification utilities use Python 3.11+ and its standard library; the hosted runners provide this, with no additional Python packages required.

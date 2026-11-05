@@ -184,9 +184,9 @@ Image decode(const icons::Result& result)
     return image;
 }
 
-Image load(const fs::path& path, int size, icons::Kind kind)
+Image load(const fs::path& path, int size, icons::Kind kind, bool hideShortcut = false)
 {
-    Image image = decode(icons::load(path.u16string(), size, kind));
+    Image image = decode(icons::load(path.u16string(), size, kind, hideShortcut));
     require(image.width == static_cast<UINT>(size) && image.height == static_cast<UINT>(size),
             "PNG dimensions do not exactly match the requested size");
     bool visible = false;
@@ -281,6 +281,64 @@ fs::path customFolder(const fs::path& path, const fs::path& icon)
     return path;
 }
 
+void checkEnlarged(const Image& source, const Image& enlarged)
+{
+    const UINT factor = enlarged.width / source.width;
+    require(factor > 1 && source.width * factor == enlarged.width,
+            "Invalid pixel replication test dimensions");
+    for (UINT y = 0; y < enlarged.height; ++y)
+        for (UINT x = 0; x < enlarged.width; ++x) {
+            const auto* expected = source.rgba.data() +
+                (static_cast<std::size_t>(y / factor) * source.width + x / factor) * 4;
+            const auto* actual = enlarged.rgba.data() +
+                (static_cast<std::size_t>(y) * enlarged.width + x) * 4;
+            require(std::equal(expected, expected + 4, actual),
+                    "Enlargement did not preserve each source pixel as an exact square");
+        }
+}
+
+void shortcut(const fs::path& path, const fs::path& target, const fs::path& icon,
+              int index = 0)
+{
+    ComPtr<IShellLinkW> link;
+    check(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+          IID_PPV_ARGS(link.GetAddressOf())), "Create Shell shortcut");
+    check(link->SetPath(target.c_str()), "Set shortcut target");
+    if (!icon.empty())
+        check(link->SetIconLocation(icon.c_str(), index), "Set shortcut icon");
+    ComPtr<IPersistFile> persisted;
+    check(link.As(&persisted), "Query shortcut persistence");
+    check(persisted->Save(path.c_str(), TRUE), "Save shortcut");
+}
+
+void executableIcon(const fs::path& path)
+{
+    std::vector<wchar_t> module(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+    require(length > 0 && length < module.size(), "Cannot locate fixture executable");
+    require(fs::copy_file(module.data(), path), "Cannot copy fixture executable");
+    struct Resources {
+        HANDLE handle;
+        ~Resources() { if (handle) EndUpdateResourceW(handle, TRUE); }
+    } resources{BeginUpdateResourceW(path.c_str(), TRUE)};
+    require(resources.handle != nullptr, "Cannot edit fixture executable resources");
+    auto ico = iconFixture();
+    const DWORD bytes = static_cast<DWORD>(ico.size() - 22);
+    require(UpdateResourceW(resources.handle, RT_ICON, MAKEINTRESOURCEW(1),
+                            0, ico.data() + 22, bytes) != 0, "Cannot embed icon pixels");
+    std::vector<unsigned char> group;
+    append16(group, 0); append16(group, 1); append16(group, 1);
+    group.insert(group.end(), {32, 32, 0, 0});
+    append16(group, 1); append16(group, 32);
+    append32(group, bytes); append16(group, 1);
+    require(UpdateResourceW(resources.handle, RT_GROUP_ICON, MAKEINTRESOURCEW(1),
+                            0, group.data(), static_cast<DWORD>(group.size())) != 0,
+            "Cannot embed icon directory");
+    const BOOL saved = EndUpdateResourceW(resources.handle, FALSE);
+    resources.handle = nullptr;
+    require(saved != 0, "Cannot save fixture executable resources");
+}
+
 void run()
 {
     Fixtures fixtures;
@@ -350,6 +408,8 @@ void run()
 
     const auto icon = fixtures.root / L"\u900f\u660e-32.ico";
     write(icon, iconFixture());
+    const auto executable = fixtures.root / L"legacy-32.exe";
+    executableIcon(executable);
     const auto custom = customFolder(fixtures.root / L"\u30ab\u30b9\u30bf\u30e0", icon);
     for (int size : {32, 48, 64, 128, 256, 257}) {
         std::cout << "Legacy ICO file size=" << size << '\n';
@@ -357,6 +417,52 @@ void run()
         std::cout << "Legacy ICO folder size=" << size << '\n';
         checkFixture(load(custom, size, icons::Kind::folder));
     }
+    for (const auto& target : {icon, custom, executable}) {
+        const auto kind = target == custom ? icons::Kind::folder : icons::Kind::file;
+        const auto source = load(target, 32, kind);
+        for (int size : {128, 256}) {
+            const auto enlarged = load(target, size, kind);
+            checkFixture(enlarged);
+            checkEnlarged(source, enlarged);
+        }
+        require(load(target, 256, kind).rgba == load(target, 256, kind, true).rgba,
+                "Suppressing shortcut arrows changed a non-shortcut");
+    }
+
+    for (const auto& target : {file, folder, executable}) {
+        const auto link = fixtures.root / (target.filename().wstring() + L".lnk");
+        const auto& resource = target == executable ? executable : icon;
+        shortcut(link, target, resource, target == executable ? -1 : 0);
+        for (int size : {32, 128, 256}) {
+            const auto plain = load(link, size, icons::Kind::file, true);
+            const auto decorated = load(link, size, icons::Kind::file);
+            require(plain.rgba == load(resource, size, icons::Kind::file).rgba,
+                    "Suppressed shortcut did not preserve its custom icon");
+            unsigned changed = 0;
+            for (UINT y = 0; y < decorated.height; ++y)
+                for (UINT x = 0; x < decorated.width; ++x) {
+                    const auto offset = (static_cast<std::size_t>(y) * size + x) * 4;
+                    if (!std::equal(plain.rgba.data() + offset,
+                                    plain.rgba.data() + offset + 4,
+                                    decorated.rgba.data() + offset)) {
+                        ++changed;
+                        require(x < static_cast<UINT>(size) / 2 &&
+                                    y >= static_cast<UINT>(size) / 2,
+                                "Shortcut badge changed pixels outside the lower-left corner");
+                    }
+                }
+            require(changed > 0, "Shortcut arrow is missing by default");
+        }
+        checkEnlarged(load(link, 32, icons::Kind::file, true),
+                      load(link, 256, icons::Kind::file, true));
+    }
+    const auto defaultLink = fixtures.root / L"default-executable.lnk";
+    shortcut(defaultLink, executable, {});
+    checkEnlarged(load(executable, 32, icons::Kind::file),
+                  load(defaultLink, 256, icons::Kind::file, true));
+    require(load(defaultLink, 256, icons::Kind::file).rgba !=
+                load(defaultLink, 256, icons::Kind::file, true).rgba,
+            "Default executable shortcut is missing its arrow");
 
     // A real 256px canvas intentionally containing only 16px of artwork must
     // stay padded. Resource dimensions, never alpha bounds, control scaling.

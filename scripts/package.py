@@ -20,11 +20,12 @@ BUNDLE = "get-icon.bundle"
 MAC = f"{BUNDLE}/Contents/MacOS/get-icon"
 WIN = f"{BUNDLE}/Contents/Windows64/get-icon.4DX"
 RESOURCE = f"{BUNDLE}/Contents/Resources/manifest.json"
+CONSTANTS = f"{BUNDLE}/Contents/Resources/constants.xlf"
 PLIST = f"{BUNDLE}/Contents/Info.plist"
 SIGNATURE = f"{BUNDLE}/Contents/_CodeSignature/CodeResources"
 LAYOUTS = {
-    "macos-universal": {MAC, RESOURCE, PLIST},
-    "windows-x64": {WIN, RESOURCE},
+    "macos-universal": {MAC, RESOURCE, CONSTANTS, PLIST},
+    "windows-x64": {WIN, RESOURCE, CONSTANTS},
 }
 BINDING = ("source_commit", "sdk_commit", "version")
 SEMVER = re.compile(
@@ -301,6 +302,8 @@ def assemble(inputs, output):
     win_payload = inputs / "windows/payload"
     require((mac_payload / RESOURCE).read_bytes() == (win_payload / RESOURCE).read_bytes(),
             "Resource manifest bytes differ")
+    require((mac_payload / CONSTANTS).read_bytes() == (win_payload / CONSTANTS).read_bytes(),
+            "Resource constants bytes differ")
     validate_plist(mac_payload, expected["version"])
     validate_pe(win_payload / WIN)
     if sys.platform == "darwin":
