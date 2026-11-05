@@ -460,6 +460,12 @@ class SnapshotTests(unittest.TestCase):
 
 
 class NativeMetadataTests(unittest.TestCase):
+    def test_shared_resources_use_lf_checkout(self):
+        resources = ("get-icon/manifest.json", "get-icon/constants.xlf")
+        attributes = subprocess.check_output(
+            ["git", "check-attr", "eol", "--", *resources], cwd=package.ROOT).decode()
+        self.assertEqual(attributes.splitlines(), [f"{path}: eol: lf" for path in resources])
+
     def test_readonly_fixture_cleanup(self):
         root = Path(__file__).resolve().parent / (".test-cleanup-" + uuid.uuid4().hex)
         root.mkdir()
