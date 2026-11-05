@@ -12,12 +12,15 @@ template<typename T> struct Owned {
 };
 }
 
-Result load(const std::u16string& path, std::int32_t size, Kind kind) {
+Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPolicy overlays) {
     @autoreleasepool {
         if (![NSThread isMainThread])
             return {{}, "AppKit extraction requires the Cocoa main thread"};
         if (!validSize(size))
             return {{}, "Invalid image size"};
+        if (overlays != OverlayPolicy::system && overlays != OverlayPolicy::noShortcut &&
+            overlays != OverlayPolicy::none)
+            return {{}, "Invalid icon overlay policy"};
         if (path.empty() || path.find(u'\0') != std::u16string::npos)
             return {{}, "Invalid path"};
         NSString* file = [[NSString alloc] initWithCharacters:
@@ -26,6 +29,21 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind) {
         if (![[NSFileManager defaultManager] fileExistsAtPath:file isDirectory:&directory] ||
             bool(directory) != (kind == Kind::folder))
             return {{}, "Path is missing or has the wrong file/folder kind"};
+        if (overlays != OverlayPolicy::system) {
+            NSURL* url = [NSURL fileURLWithPath:file];
+            NSNumber* alias = nil;
+            NSError* error = nil;
+            if (![url getResourceValue:&alias forKey:NSURLIsAliasFileKey error:&error])
+                return {{}, "Cannot read Finder alias metadata"};
+            if (alias.boolValue) {
+                NSURL* target = [NSURL URLByResolvingAliasFileAtURL:url
+                    options:NSURLBookmarkResolutionWithoutUI |
+                            NSURLBookmarkResolutionWithoutMounting error:&error];
+                if (!target)
+                    return {{}, "Cannot resolve Finder alias target"};
+                file = target.path;
+            }
+        }
         NSImage* image = [[NSWorkspace sharedWorkspace] iconForFile:file];
         if (!image)
             return {{}, "NSWorkspace returned no icon"};
@@ -42,9 +60,10 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind) {
         if (!context.value)
             return {{}, "Cannot allocate RGBA bitmap"};
         CGContextClearRect(context.value, CGRectMake(0, 0, size, size));
-        CGContextSetInterpolationQuality(context.value, kCGInterpolationHigh);
         const double width = CGImageGetWidth(source), height = CGImageGetHeight(source);
         const double scale = std::min(size / width, size / height);
+        CGContextSetInterpolationQuality(context.value,
+            scale > 1 ? kCGInterpolationNone : kCGInterpolationHigh);
         CGContextDrawImage(context.value, CGRectMake((size - width * scale) / 2,
             (size - height * scale) / 2, width * scale, height * scale), source);
         Owned<CGImageRef> rendered{CGBitmapContextCreateImage(context.value)};

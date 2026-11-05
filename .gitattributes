@@ -1,3 +1,4 @@
 get-icon/manifest.json text eol=lf
+get-icon/constants.xlf text eol=lf
 VERSION text eol=lf
 LICENSE text eol=lf

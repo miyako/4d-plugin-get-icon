@@ -56,6 +56,7 @@ class PackageTests(unittest.TestCase):
         (mac / "MacOS/get-icon").chmod(0o755)
         (mac / "Resources").mkdir()
         (mac / "Resources/manifest.json").write_bytes(b'{"name":"get-icon"}\n')
+        (mac / "Resources/constants.xlf").write_bytes(b'<xliff version="1.0"/>\n')
         (mac / "Info.plist").write_bytes(plistlib.dumps({
             "CFBundlePackageType": "BNDL", "CFBundleExecutable": "get-icon",
             "CFBundleVersion": "1.2.3", "CFBundleShortVersionString": "1.2.3"}))
@@ -70,6 +71,7 @@ class PackageTests(unittest.TestCase):
         struct.pack_into("<H", pe, 88, 0x20B)
         (win / "Windows64/get-icon.4DX").write_bytes(pe)
         (win / "Resources/manifest.json").write_bytes(b'{"name":"get-icon"}\n')
+        (win / "Resources/constants.xlf").write_bytes(b'<xliff version="1.0"/>\n')
         package.stage("macos", self.inputs)
         package.stage("windows", self.inputs)
 
@@ -205,6 +207,13 @@ class PackageTests(unittest.TestCase):
         path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
         self.update_manifest(lambda m: m.update(files=package.hashes(self.inputs / "windows/payload")))
         with self.assertRaisesRegex(package.PackageError, "Resource manifest"):
+            self.assemble()
+
+    def test_constants_mismatch_with_valid_hash(self):
+        path = self.inputs / "windows/payload" / package.CONSTANTS
+        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+        self.update_manifest(lambda m: m.update(files=package.hashes(self.inputs / "windows/payload")))
+        with self.assertRaisesRegex(package.PackageError, "Resource constants"):
             self.assemble()
 
     def test_overwrite_prevention(self):
@@ -451,6 +460,12 @@ class SnapshotTests(unittest.TestCase):
 
 
 class NativeMetadataTests(unittest.TestCase):
+    def test_shared_resources_use_lf_checkout(self):
+        resources = ("get-icon/manifest.json", "get-icon/constants.xlf")
+        attributes = subprocess.check_output(
+            ["git", "check-attr", "eol", "--", *resources], cwd=package.ROOT).decode()
+        self.assertEqual(attributes.splitlines(), [f"{path}: eol: lf" for path in resources])
+
     def test_readonly_fixture_cleanup(self):
         root = Path(__file__).resolve().parent / (".test-cleanup-" + uuid.uuid4().hex)
         root.mkdir()

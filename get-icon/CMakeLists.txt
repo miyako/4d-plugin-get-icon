@@ -19,8 +19,8 @@ if(APPLE)
     add_library(icon-native STATIC icon-macos.mm)
     target_compile_options(icon-native PRIVATE -fobjc-arc)
     target_link_libraries(icon-native PUBLIC "-framework AppKit" "-framework ImageIO")
-    add_library(get-icon MODULE ${PLUGIN_SOURCES} manifest.json)
-    set_source_files_properties(manifest.json PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    add_library(get-icon MODULE ${PLUGIN_SOURCES} manifest.json constants.xlf)
+    set_source_files_properties(manifest.json constants.xlf PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
     set_target_properties(get-icon PROPERTIES
         BUNDLE TRUE BUNDLE_EXTENSION bundle
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
@@ -38,7 +38,7 @@ elseif(WIN32)
     add_library(icon-native STATIC icon-windows.cpp)
     target_compile_definitions(icon-native PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(icon-native PUBLIC shell32 ole32 windowscodecs gdi32)
-    add_library(get-icon SHARED ${PLUGIN_SOURCES})
+    add_library(get-icon SHARED ${PLUGIN_SOURCES} manifest.json constants.xlf)
     set_target_properties(get-icon PROPERTIES SUFFIX ".4DX"
         RUNTIME_OUTPUT_DIRECTORY "${TEST_PLUGINS}/get-icon/Contents/Windows64"
         LINK_FLAGS "/DEF:\"${SDK_DIR}/4DPluginAPI.def\"")
@@ -50,6 +50,7 @@ elseif(WIN32)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${TEST_PLUGINS}/get-icon/Contents/Resources"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/manifest.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/constants.xlf"
             "${TEST_PLUGINS}/get-icon/Contents/Resources")
 else()
     message(FATAL_ERROR "Only macOS and Windows are supported")

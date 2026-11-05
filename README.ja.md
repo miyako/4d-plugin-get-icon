@@ -1,0 +1,164 @@
+# get-icon
+
+[English](README.md) | [日本語](README.ja.md)
+
+macOSとWindowsで、ファイルやフォルダーのアイコンを**アルファチャンネル付きのPNG形式のピクチャ**として返す4Dネイティブプラグインです。FinderまたはWindows Shellを利用するため、OSが認識するカスタムアイコンにも対応します。サムネイルの生成や、カスタムアイコン設定の独自解釈は行いません。
+
+## 動作環境
+
+- 4D 21.1以降。
+- AppKitを備えたmacOS、またはWindows 10/11（x64）。
+- コマンドは協調プロセス専用です（`threadSafe: false`）。
+
+## コマンド
+
+```4d
+$picture:=File Get icon($file {; $size {; $options}})
+$picture:=Folder Get icon($folder {; $size {; $options}})
+```
+
+manifest上のシグネチャは`File Get icon(&J;&L;&L):P`と`Folder Get icon(&J;&L;&L):P`です。
+
+| パラメーター | 型 | 説明 |
+|---|---|---|
+| `$file` / `$folder` | Object | ディスク上に存在するファイルまたはフォルダーを参照する`4D.File` / `4D.Folder` |
+| `$size` | Integer | 正方形の出力画像の一辺のサイズ（物理ピクセル単位）。省略時は**256** |
+| `$options` | Integer | オーバーレイの表示方法。下記の定数を参照。省略、**0**、未定義の値はシステムが選択したオーバーレイを表示 |
+| `$picture` | Picture | 成功時はPNG形式のピクチャ。失敗時は実際に空のピクチャ |
+
+```4d
+var $file; $folder : Object
+var $picture : Picture
+$file:=File("/LOGS/report.pdf")
+$picture:=File Get icon($file)
+$folder:=Folder(fk database folder)
+$picture:=Folder Get icon($folder; 128)
+// Windowsの.lnkファイル、またはmacOSのFinderエイリアスの場合:
+// $picture:=File Get icon($shortcut; 256; Icon No shortcut arrow)
+// ショートカット以外のShell状態バッジを含め、対応するオーバーレイをすべて非表示にする場合:
+// $picture:=File Get icon($file; 256; Icon No overlays)
+If (Picture size($picture)=0)
+    // パスが存在しない、サイズが不正、ネイティブ処理やエンコードに失敗した場合
+End if
+```
+
+4Dでは、省略されたLongintパラメーターはゼロとして渡されます。そのため、**サイズにゼロを指定した場合も既定の256ピクセル**になります。負の値はエラーです。使用するSDKにはパラメーターの指定有無や個数を取得する機能がないため、非公開ABIの解析は行いません。4チャンネルの画像バッファーがWICの`UINT32_MAX`バイトを超えるサイズは、ネイティブメモリーを確保する前に拒否します（計算上の最大サイズは一辺32767ピクセルで、両プラットフォーム共通です）。これはネイティブAPIで表現できる上限であり、実際にメモリーを確保できる保証ではありません。大きな画像ではメモリー不足になることがあります。SDKの符号付き32ビット長に収まる必要があるのは、エンコード後のPNGデータです。
+
+出力は画面のDPIやRetina倍率にかかわらず、正確に`$size`×`$size`ピクセルです。意図的に設けられた余白も含め、元のアイコンのキャンバス全体を縦横比を保って収めます。切り抜きは行いません。小さなビットマップを拡大する際は最近傍補間を使用し、平滑化せずに元のピクセルを明確なブロックとして保持します。32×32から128×128への拡大では各ピクセルが4×4、256×256への拡大では8×8になります。縮小時は高品質なフィルター処理を使用します。拡大しても元の画像にない細部は生成されず、画像内の余白も除去されません。
+
+**Windows:** ショートカットに限らず、ファイルとフォルダーの両方で、Shellが選択したオーバーレイを既定で表示します。Windowsやインストール済みのShell拡張機能が従来のオーバーレイ機構を通じて提供する場合、ショートカットの矢印、バージョン管理の状態、同期状態、共有やアクセス制限のバッジなどが対象になります。表示するオーバーレイはWindowsが1つ選択します。プラグインは複数のバッジを重ねたり、独自の優先順位を設定したりしません。利用できるバッジはWindowsのバージョン、インストール済みのハンドラー、設定、およびシステムのオーバーレイスロットの空き状況によって異なります。新しいクラウド状態インジケーターやUACシールドがこの機構で取得できるとは限りません。また、他のプロセスがファイルを開いている、あるいはロックしていることを示す汎用的なバッジはありません。
+
+`Icon No shortcut arrow`（**1**）は、システムのショートカットオーバーレイだけを非表示にします。ショートカットに別の状態バッジが選択されている場合は、そのバッジを維持します。`Icon No overlays`（**2**）は、Shellオーバーレイの追加合成をすべて省略します。どちらの指定も、元のアイコン画像に描き込まれている装飾は除去しません。これらの値は排他的な表示モードであり、組み合わせて使用するビットフラグではありません。未定義の値を指定した場合は既定の表示方法になります。
+
+**macOS:** 既定ではFinderのネイティブアイコンをそのまま使用します。どちらの非表示オプションも、Finderエイリアスを解決してリンク先のアイコンを使用します。リンク先を解決できない場合は明示的にエラーとなります。現在の`NSWorkspace`バックエンドでは、Finder Sync拡張機能のバッジ、クラウド状態、ロックの装飾を個別に扱う機能には対応していません。
+
+Windowsの`.lnk`ファイルやmacOSのFinderエイリアスは、リンク先がフォルダーであっても**File Get icon**に渡してください。
+
+失敗時（存在しない、または削除済みのパス、ファイルとフォルダーの種別の不一致、メモリー確保やエンコードのエラーなど）は、透明なPNGではなく`PA_CreatePicture(nullptr, 0)`による空のピクチャを返します。診断メッセージは標準エラー出力に記録します。返されたピクチャの所有権は4Dにあります。
+
+## 定数
+
+**Icon options**テーマでは、`constants.xlf`で定義した次のプラグイン定数を使用できます。定数名は英語版と共通です。
+
+| 定数 | 型 | 値 | 説明 |
+|---|---|---|---|
+| `Icon No shortcut arrow` | Longint | 1 | ショートカットの矢印だけを非表示にし、その他のWindows Shellオーバーレイは維持 |
+| `Icon No overlays` | Longint | 2 | Windows Shellオーバーレイの追加合成をすべて省略。macOSではFinderエイリアスの矢印を非表示 |
+
+## ネイティブ実装
+
+macOSでは`NSWorkspace.iconForFile:`でアイコンを取得し、指定サイズのクリア済み8ビットsRGB RGBA CoreGraphicsビットマップに描画します。拡大時は最近傍補間、縮小時は高品質なフィルター処理を使用し、ImageIOでPNGにエンコードします。キャッシュされた`NSImage`や現在のAppKitグラフィックスコンテキストは変更しません。AppKitを使用する前に、`PA_RunInMainProcess`で4Dのメインプロセスに処理を移し、Cocoaのメインスレッドであることを確認します。メインキューへの同期ディスパッチは行いません。
+
+Windowsでは`SHCreateItemFromParsingName`でUTF-16の実際のパスを解決し、`SIIGBF_ICONONLY`を指定して`IShellItemImageFactory::GetImage`を呼び出します。Shellによる補間を避け、拡大はWICで行います。`SHGFI_ADDOVERLAYS | SHGFI_OVERLAYINDEX`を指定した`SHGetFileInfoW`で、対象項目に対してShellが選択したオーバーレイを取得します。システムイメージリストからその画像を取得し、基本アイコンのサイズ調整後にアルファ合成します。ショートカットの矢印だけを非表示にする場合は、選択されたオーバーレイのインデックスを`SHGetIconOverlayIndexW`で取得した標準リンクオーバーレイと比較します。ショートカットに付くすべてのバッジを一律に非表示にするわけではありません。抽出とエンコードはネイティブCOMおよびWICを使用してメモリー内で行い、一時ファイル、サムネイル、背景色の指定、GDI+によるビットマップ変換は使用しません。
+
+確認済みのWindows環境では、`SIIGBF_SCALEUP`を指定しなくても、古いアイコンをShellで抽出すると、正しく拡大されたアイコンではなく大きなキャンバスだけが返される場合があります。Shellのアイコン位置情報、WICで取得したICOのサイズ、EXE/DLLのグループアイコンリソースのサイズを利用し、元のキャンバスサイズで抽出してからWICで拡大します。実行ファイルのリソースはデータとしてのみ読み込み、実行しません。ショートカットのアイコン位置やリンク先の読み取りでも、対象を起動することはありません。画像のアルファ領域に合わせた切り抜きや、意図的な余白の除去は行いません。この補正はICOファイル、ICOを使用するShellアイコン、実行ファイル内のアイコン、およびそれらを使用するショートカットに対応します。ただし、任意のサードパーティーShellプロバイダーからは、低解像度や余白付きの画像が提供されることがあります。
+
+ファイルシステムオブジェクトは、4DのFile/Folderコンストラクターと`fk platform path`を使用して再構築します。macOSバックエンドには再構築されたPOSIX形式の`path`を渡し、WindowsではUnicodeの`platformPath`を維持します。SDKから取得したプロパティ文字列は、所有元の変数をクリアする前にコピーします。
+
+## ビルドとインストール
+
+[Releases](https://github.com/miyako/4d-plugin-get-icon/releases)からZIPまたはDMGをダウンロードしてください。展開またはマウントした後、**get-icon.bundle**をデータベースの**Plugins**フォルダーにコピーし、4Dを再起動します。バンドル内の`Contents`階層をそのまま維持してください。どちらの形式にもmacOSユニバーサルバイナリーとWindows x64バイナリーが含まれます。macOS版はDeveloper IDによる署名と公証を行いますが、Windows版はAuthenticode署名を行いません。
+
+このプロジェクトは、チュートリアルの`example/`にあるCMakeとテストプロジェクトのひな形をベースにしています。対応するビルド方法はCMakeのみです。古いテンプレートのIDEプロジェクトを維持するのではなく、`-G Xcode`やインストール済みのVisual Studioジェネレーターを使用してIDEプロジェクトを生成してください。
+
+```sh
+git clone --recurse-submodules https://github.com/miyako/4d-plugin-get-icon.git
+cd 4d-plugin-get-icon
+cmake -S get-icon -B get-icon/build -DCMAKE_BUILD_TYPE=Release
+cmake --build get-icon/build --config Release --parallel
+ctest --test-dir get-icon/build -C Release --output-on-failure
+```
+
+Windowsでは構成時に`-A x64`を指定してください。macOSのユニバーサルバンドルを作成する場合は`-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`を追加します。CMake 3.20以降と、macOSではXcode、WindowsではWindows SDKを備えたVisual Studioが必要です。サードパーティーの画像ライブラリーは不要です。4D SDKはサブモジュールで特定のコミットに固定しています。
+
+出力先は`get-icon/get-icon-test/Plugins/`です。macOSでは`get-icon.bundle`、Windowsでは`get-icon/Contents/Windows64/get-icon.4DX`と、同じ`Contents`配下の`Resources`フォルダーを生成します。このプラグインディレクトリーをデータベースの**Plugins**フォルダーにコピーし、4Dを再起動してください。ローカルビルドではDeveloper IDによる署名や公証は行いません。
+
+manifestのID（`31071`）はプロジェクト内で使用するIDであり、本番用に正式登録された番号であることを意味しません。同じIDやコマンド名を使用する別のプラグインがインストールされていないことを確認してください。
+
+## テストとCI
+
+ネイティブテストでは、ピクセルサイズ、PNGのアルファチャンネル、Unicodeパス、カスタムアイコン、古いアイコン画像、オーバーレイの表示モード、不正な入力、繰り返し抽出を確認します。Windowsの回帰テストでは、通常のファイル、フォルダー、ショートカットについて、表示モードの結果を実際のShellの選択と比較します。また、元のピクセルが正確に4×4または8×8のブロックになること、およびファイルやフォルダーへのショートカットで左下に矢印が合成されることを確認します。サードパーティーの状態オーバーレイには、そのプロバイダーのインストールが必要です。テスト自身はハンドラーをインストールしたり、システムの関連付けを変更したりしません。チュートリアルをベースにした4Dテストプロジェクトでは、両コマンド、2つの名前付きオーバーレイ定数、未定義オプションの既定動作、既定サイズ、デコード後のPNGサイズ、繰り返し呼び出し、および失敗時に`Picture size(...)=0`となることを確認します。
+
+対応するバージョンの[tool4d](https://developer.4d.com/docs/Admin/cli/)ランタイムで統合テストを実行できます。ライセンスは不要です。
+
+```sh
+/path/to/tool4d --dataless --startup-method=test_all \
+  --project="$PWD/get-icon/get-icon-test/Project/get-icon.4DProject"
+```
+
+正常終了と、完全一致する`PASS`の出力行の両方を確認してください。tool4dは言語エラーの後でも終了コード0を返すことがあります。統合テストでは、別の4D協調プロセスからの抽出も確認します。`.github/workflows/test.yml`は、push、プルリクエスト、および手動実行時に、macOSとWindowsでビルドとネイティブ/4Dテストを実行します。
+
+**通常のビルドやPRテストに独自のシークレットは不要です。** チェックアウトにはGitHubが自動提供する`GITHUB_TOKEN`をコンテンツ読み取り専用で使用します。tool4dは公開URLからダウンロードでき、ライセンス認証も不要です。CIでは、テスト済みのネイティブバイナリーをステージングし、ソースに紐付けられたマニフェストを確認し、同じ実行内で実際に生成したmacOS/Windows成果物の受け渡しを検証します。テスト専用のアドホック署名では、バンドルの厳密な検証、ZIP/DMGの作成と展開、および両プラットフォームをまとめたプラグインのスモークテストを行います。この署名済みデータを配布物としてアップロードしたり、本番署名として受け入れたりすることはありません。一時的なビルド入力は、署名済みの配布パッケージではありません。
+
+## 署名済み配布パッケージ
+
+`.github/workflows/release.yml`は、**macOSのDeveloper ID Application署名とAppleの公証**を行います。WindowsのAuthenticode署名は意図的に実装していないため、同梱するWindowsの`.4DX`は未署名です。
+
+GitHub Actionsで**Build and Release**を手動実行し、**main**を選択してください。それ以外の参照は、本番ジョブと署名スクリプトが拒否します。手動実行時の固定されたコミットを、両プラットフォームのビルド、既存のネイティブ/tool4dテスト、入力マニフェスト、およびパッケージングに使用します。バージョンの唯一の参照元は`VERSION`です。このワークフローではバージョン更新やコードのマージは行いません。
+
+署名、公証、検証、およびパッケージ化後のスモークテストがすべて成功した場合に限り、独立した公開ジョブに`contents: write`権限を付与します。このジョブは、手動実行時の正確なコミットに`v<VERSION>`タグを作成し、ドラフトのGitHub Releaseにファイルをアップロードした後、アップロード済みファイルを再ダウンロードしてチェックサムを確認し、リリースを公開します。既存のタグを移動することはありません。タグが別のコミットを指している場合や、リリースがすでに存在する場合は、上書きせずに公開を停止します。ドラフトへのアップロードに失敗した場合は、確認用のドラフトとして残し、公開リリースにはしません。その他のジョブと通常のCIは読み取り専用です。
+
+ワークフローは、macOSユニバーサルバイナリーとWindows x64バイナリーをビルドし、ハッシュ、バージョン、ソース/SDKのコミットを検証したうえで、次のように1つのポータブルなプラグインにまとめます。
+
+```text
+get-icon.bundle/
+  Contents/
+    Info.plist
+    MacOS/get-icon
+    Windows64/get-icon.4DX
+    Resources/manifest.json
+    Resources/constants.xlf
+```
+
+パッケージングと検証のユーティリティーには、Python 3.11以降と標準ライブラリーを使用します。ホストランナーに用意されているため、追加のPythonパッケージは不要です。
+
+バンドルは、Hardened Runtimeとセキュアなタイムスタンプを使用してDeveloper IDで署名します。署名IDと生成された署名は、`NOTARYTOOL_TEAM_ID`と一致する必要があります。検証エラー、認証情報の不足、署名エラー、公証結果が**Accepted**以外の場合はワークフローが失敗します。本番処理でアドホック署名や未署名パッケージに切り替えることはありません。DMGコンテナーにも別途署名と公証を行い、チケットをステープルし、検証とGatekeeperによる評価を実施します。ZIPも公証しますが、ZIP自体にチケットをステープルすることはできません。チケット付きのダウンロードが必要な場合はDMGを使用してください。
+
+両形式が合格した後、ZIPを展開し、最終的なファイル一覧と署名を検証してから、実際にパッケージ化されたプラグインをtool4dで実行します。その後、成果物をアップロードします。成功した実行から`get-icon-signed-packages-<commit>`をダウンロードしてください。ZIP、DMG、公証レポート、`PROVENANCE.json`、`SHA256SUMS`が含まれます。パッケージには、プラグイン/SDKのライセンスと、署名前のネイティブバイナリーのハッシュを明示した`BUILD-PROVENANCE.json`も含まれます。`PROVENANCE.json`は署名済みペイロードのファイル一覧を記録し、`SHA256SUMS`は**署名とDMGへのステープル後**の最終アーカイブのハッシュを記録します。
+
+```sh
+shasum -a 256 -c SHA256SUMS
+xcrun stapler validate get-icon-1.0.0.dmg
+spctl --assess --type open --context context:primary-signature get-icon-1.0.0.dmg
+```
+
+### 署名に必要なシークレット
+
+提示されたmigrationプラグインのワークフローと同じ6つの名前を使用します。リポジトリーの**Settings > Secrets and variables > Actions**、または**release-signing**環境のシークレットとして設定してください。
+
+| シークレット | 用途と設定方法 |
+|---|---|
+| `APPLE_DEVELOPER_ID_CERTIFICATE` | macOSのキーチェーンアクセスから、**Developer ID Application**証明書と秘密鍵を`.p12`形式で書き出します。`base64 -i certificate.p12 \| pbcopy`でエンコードし、その値を設定してください。Apple Development証明書では代用できません。 |
+| `APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD` | `.p12`の書き出し時に指定したパスワード。 |
+| `KEYCHAIN_PASSWORD` | CIの一時キーチェーン専用に使用する、新しい強力なランダムパスワード。 |
+| `NOTARYTOOL_APPLE_ID` | 対象のApple Developerチームでの操作が許可されたApple IDのメールアドレス。 |
+| `NOTARYTOOL_TEAM_ID` | Apple DeveloperアカウントのMembership詳細で確認できる10文字のチームID。署名証明書のチームと一致する必要があります。 |
+| `NOTARYTOOL_PASSWORD` | [account.apple.com](https://account.apple.com/)の**Sign-In and Security > App-Specific Passwords**で作成したアプリ用パスワード。 |
+
+PAT、GitHub Appの認証情報、Windows用証明書、追加の4Dライセンスは不要です。ワークフローは一時キーチェーンを使用し、署名ツールにだけアクセスを許可し、終了時に削除します。承認を必要とする場合は、**Settings > Environments > release-signing**でmainのみを許可するデプロイ制限と必須レビュー担当者を設定してください。通常のPRジョブにシークレットを渡す必要はありません。
+
+本番のDeveloper ID署名、公証、およびGatekeeperによる受け入れ確認には、これらの認証情報を設定した後、権限のあるユーザーによる手動実行が必要です。シークレットを使わないCIでは、ネイティブビルド、成果物の受け渡し、パッケージ構成と来歴情報、および署名条件を満たさない場合に確実に停止することを検証します。実際の署名済み・公証済み配布物が生成されたことを意味するものではありません。
+
+## 参考情報とライセンス
+
+ネイティブコードとひな形には[MITライセンス](LICENSE)を適用します。SDKについては、サブモジュール内の別のライセンスを参照してください。
