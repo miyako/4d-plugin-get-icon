@@ -1,0 +1,83 @@
+name: Bump version
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        description: Semantic version bump
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-version-main
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require an explicit dispatch from main
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] || [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::Version bumps must be dispatched from main."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Bump VERSION and commit to main
+        id: bump
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(cat VERSION)
+          if ! [[ "$CURRENT" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::VERSION must contain a semantic version such as 1.1.1."
+            exit 1
+          fi
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "$MODE" in
+            major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH+1)) ;;
+            *) echo "::error::Unknown bump mode: $MODE"; exit 1 ;;
+          esac
+          NEW="${MAJOR}.${MINOR}.${PATCH}"
+          set +e
+          git ls-remote --exit-code origin "refs/tags/v$NEW"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::error::Version v$NEW is already tagged; refusing to reuse it."
+            exit 1
+          elif [ "$status" -ne 2 ]; then
+            echo "::error::Could not inspect remote version tags."
+            exit "$status"
+          fi
+          printf '%s\n' "$NEW" > VERSION
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore: bump version to $NEW" \
+            -m "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
+          git push origin HEAD:refs/heads/main
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+      - name: Summary
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          {
+            echo "### Bumped VERSION to $VERSION"
+            echo "Run **Build and Release** from **main** to publish v$VERSION."
+            echo "The release workflow creates the tag only after signing and verification succeed."
+          } >> "$GITHUB_STEP_SUMMARY"
