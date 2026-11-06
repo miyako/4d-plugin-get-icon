@@ -423,7 +423,7 @@ void shortcut(const fs::path& path, const fs::path& target, const fs::path& icon
     check(persisted->Save(path.c_str(), TRUE), "Save shortcut");
 }
 
-void executableIcon(const fs::path& path)
+void executableIcon(const fs::path& path, const char* level = nullptr)
 {
     std::vector<wchar_t> module(32768, L'\0');
     const DWORD length = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
@@ -446,9 +446,129 @@ void executableIcon(const fs::path& path)
     require(UpdateResourceW(resources.handle, RT_GROUP_ICON, MAKEINTRESOURCEW(1),
                             0, group.data(), static_cast<DWORD>(group.size())) != 0,
             "Cannot embed icon directory");
+    if (level) {
+        const std::string manifest =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+            "<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">"
+            "<trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v3\"><security>"
+            "<requestedPrivileges><requestedExecutionLevel level=\"" + std::string(level) +
+            "\" uiAccess=\"false\"/></requestedPrivileges></security></trustInfo></assembly>";
+        require(UpdateResourceW(resources.handle, RT_MANIFEST,
+                                MAKEINTRESOURCEW(CREATEPROCESS_MANIFEST_RESOURCE_ID),
+                                MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
+                                const_cast<char*>(manifest.data()),
+                                static_cast<DWORD>(manifest.size())) != 0,
+                "Cannot embed execution level manifest");
+    }
     const BOOL saved = EndUpdateResourceW(resources.handle, FALSE);
     resources.handle = nullptr;
     require(saved != 0, "Cannot save fixture executable resources");
+}
+
+bool uacEnabled()
+{
+    DWORD value = 1, bytes = sizeof(value);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE,
+                     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+                     L"EnableLUA", RRF_RT_REG_DWORD, nullptr, &value, &bytes) != ERROR_SUCCESS)
+        return true;
+    return value != 0;
+}
+
+// Compare a decorated rendering with its undecorated base: the UAC shield
+// may only change the lower-right quadrant, and must be present with UAC on.
+void checkShield(const Image& plain, const Image& shielded, bool expected)
+{
+    require(plain.width == shielded.width && plain.height == shielded.height,
+            "Shield comparison dimensions differ");
+    unsigned changed = 0;
+    for (UINT y = 0; y < plain.height; ++y)
+        for (UINT x = 0; x < plain.width; ++x) {
+            const auto offset = (static_cast<std::size_t>(y) * plain.width + x) * 4;
+            if (std::equal(plain.rgba.data() + offset, plain.rgba.data() + offset + 4,
+                           shielded.rgba.data() + offset))
+                continue;
+            ++changed;
+            require(x >= plain.width / 2 && y >= plain.height / 2,
+                    "UAC shield changed pixels outside the lower-right corner");
+        }
+    require((changed > 0) == expected,
+            expected ? "UAC shield is missing" : "Unexpected UAC shield");
+}
+
+void runAsShortcut(const fs::path& path, const fs::path& target)
+{
+    shortcut(path, target, {});
+    ComPtr<IShellLinkW> link;
+    check(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+          IID_PPV_ARGS(link.GetAddressOf())), "Create Shell shortcut");
+    ComPtr<IPersistFile> persisted;
+    check(link.As(&persisted), "Query shortcut persistence");
+    check(persisted->Load(path.c_str(), STGM_READWRITE), "Load shortcut");
+    ComPtr<IShellLinkDataList> data;
+    check(link.As(&data), "Query shortcut flags");
+    DWORD flags = 0;
+    check(data->GetFlags(&flags), "Get shortcut flags");
+    check(data->SetFlags(flags | SLDF_RUNAS_USER), "Set run as administrator");
+    check(persisted->Save(path.c_str(), TRUE), "Save shortcut");
+}
+
+void checkElevation(const fs::path& root, const fs::path& executable)
+{
+    const bool uac = uacEnabled();
+    const auto elevated = root / L"\u7ba1\u7406\u8005-setup.exe";
+    executableIcon(elevated, "requireAdministrator");
+    const auto invoker = root / L"invoker.exe";
+    executableIcon(invoker, "asInvoker");
+    const auto highest = root / L"highest.exe";
+    executableIcon(highest, "highestAvailable");
+    for (int size : {17, 32, 48, 128, 256, 512}) {
+        const auto plain = load(executable, size, icons::Kind::file);
+        const auto none = load(elevated, size, icons::Kind::file, OverlayPolicy::none);
+        require(none.rgba == plain.rgba, "No-overlays policy did not remove the UAC shield");
+        const auto shielded = load(elevated, size, icons::Kind::file);
+        checkShield(plain, shielded, uac);
+        require(load(elevated, size, icons::Kind::file, OverlayPolicy::noShortcut).rgba ==
+                    shielded.rgba,
+                "Suppressing shortcut arrows removed the UAC shield");
+        require(load(invoker, size, icons::Kind::file).rgba == plain.rgba,
+                "asInvoker executable received a UAC shield");
+        const auto maybe = load(highest, size, icons::Kind::file);
+        require(maybe.rgba == plain.rgba || maybe.rgba == shielded.rgba,
+                "highestAvailable executable received an unexpected decoration");
+    }
+
+    const auto elevatedLink = root / L"elevated-target.lnk";
+    shortcut(elevatedLink, elevated, {});
+    const auto runAsLink = root / L"run-as.lnk";
+    runAsShortcut(runAsLink, executable);
+    for (const auto& link : {elevatedLink, runAsLink})
+        for (int size : {32, 256}) {
+            const auto none = load(link, size, icons::Kind::file, OverlayPolicy::none);
+            const auto shielded = load(link, size, icons::Kind::file, OverlayPolicy::noShortcut);
+            checkShield(none, shielded, uac);
+            require(load(link, size, icons::Kind::file).rgba != shielded.rgba,
+                    "Elevated shortcut is missing its arrow");
+        }
+
+    // The compatibility "Run as administrator" setting is keyed by full path.
+    const auto layered = root / L"layered.exe";
+    executableIcon(layered);
+    constexpr wchar_t layers[] =
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers";
+    const std::wstring name = fs::absolute(layered).wstring();
+    constexpr wchar_t value[] = L"~ HIGHDPIAWARE RunAsAdmin";
+    require(RegSetKeyValueW(HKEY_CURRENT_USER, layers, name.c_str(), REG_SZ, value,
+                            sizeof(value)) == ERROR_SUCCESS,
+            "Cannot set compatibility layer");
+    struct Layer {
+        std::wstring name;
+        ~Layer() { RegDeleteKeyValueW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers",
+            name.c_str()); }
+    } cleanup{name};
+    checkShield(load(executable, 256, icons::Kind::file),
+                load(layered, 256, icons::Kind::file), uac);
 }
 
 void run()
@@ -593,6 +713,23 @@ void run()
     require(load(defaultLink, 256, icons::Kind::file).rgba !=
                 load(defaultLink, 256, icons::Kind::file, OverlayPolicy::noShortcut).rgba,
             "Default executable shortcut is missing its arrow");
+
+    // MSI advertised shortcuts often reference ICO data named *.exe. The Shell
+    // pads such icons onto the jumbo canvas; enlarge them like any small icon.
+    const auto msiIcon = fixtures.root / L"msi-product-icon.exe";
+    write(msiIcon, iconFixture());
+    const auto msiLink = fixtures.root / L"advertised.lnk";
+    shortcut(msiLink, file, msiIcon);
+    const auto msiSource = load(msiLink, 32, icons::Kind::file, OverlayPolicy::noShortcut);
+    checkFixture(msiSource);
+    for (int size : {128, 256, 512}) {
+        std::cout << "MSI style ICO shortcut size=" << size << '\n';
+        const auto enlarged = load(msiLink, size, icons::Kind::file, OverlayPolicy::noShortcut);
+        checkFixture(enlarged);
+        checkEnlarged(msiSource, enlarged);
+    }
+
+    checkElevation(fixtures.root, executable);
 
     // A real 256px canvas intentionally containing only 16px of artwork must
     // stay padded. Resource dimensions, never alpha bounds, control scaling.
