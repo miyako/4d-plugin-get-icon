@@ -37,7 +37,7 @@ if(APPLE)
 elseif(WIN32)
     add_library(icon-native STATIC icon-windows.cpp)
     target_compile_definitions(icon-native PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(icon-native PUBLIC shell32 ole32 windowscodecs gdi32)
+    target_link_libraries(icon-native PUBLIC shell32 ole32 windowscodecs gdi32 advapi32)
     add_library(get-icon SHARED ${PLUGIN_SOURCES} manifest.json constants.xlf)
     set_target_properties(get-icon PROPERTIES SUFFIX ".4DX"
         RUNTIME_OUTPUT_DIRECTORY "${TEST_PLUGINS}/get-icon/Contents/Windows64"
