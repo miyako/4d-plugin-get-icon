@@ -54,7 +54,7 @@ struct DestroyIcon {
 };
 using Icon = std::unique_ptr<std::remove_pointer_t<HICON>, DestroyIcon>;
 
-HRESULT shellOverlay(const std::wstring& path, OverlayPolicy policy, Icon& overlay)
+HRESULT shellOverlay(const std::wstring& path, UINT size, OverlayPolicy policy, Icon& overlay)
 {
     if (policy == OverlayPolicy::none) return S_OK;
     SHFILEINFOW info{};
@@ -73,10 +73,26 @@ HRESULT shellOverlay(const std::wstring& path, OverlayPolicy policy, Icon& overl
         if (index == static_cast<unsigned>(shortcut)) return S_OK;
     }
     ComPtr<IImageList> images;
-    HRESULT hr = SHGetImageList(SHIL_LARGE, IID_PPV_ARGS(images.GetAddressOf()));
-    if (FAILED(hr)) return hr;
+    UINT selectedSize = 0;
+    for (int kind : {SHIL_SMALL, SHIL_LARGE, SHIL_EXTRALARGE, SHIL_JUMBO}) {
+        ComPtr<IImageList> candidate;
+        HRESULT hr = SHGetImageList(kind, IID_PPV_ARGS(candidate.GetAddressOf()));
+        if (FAILED(hr)) return hr;
+        int width = 0, height = 0;
+        hr = candidate->GetIconSize(&width, &height);
+        if (FAILED(hr)) return hr;
+        if (width <= 0 || height <= 0) return WINCODEC_ERR_BADIMAGE;
+        const UINT extent = static_cast<UINT>(std::max(width, height));
+        // Prefer the smallest native canvas that covers the request, or the
+        // largest available one. Query dimensions because list sizes vary by DPI.
+        if (!images || (selectedSize < size && extent > selectedSize) ||
+            (extent >= size && extent < selectedSize)) {
+            images = candidate;
+            selectedSize = extent;
+        }
+    }
     int image = 0;
-    hr = images->GetOverlayImage(index, &image);
+    HRESULT hr = images->GetOverlayImage(index, &image);
     if (FAILED(hr)) return hr;
     HICON raw = nullptr;
     hr = images->GetIcon(image, ILD_TRANSPARENT, &raw);
@@ -277,36 +293,69 @@ HRESULT iconFileCanvas(IShellItem* item, IWICImagingFactory* wic,
 }
 
 HRESULT compositeOverlay(IWICImagingFactory* wic, HICON icon, UINT size,
-                         UINT stride, UINT bytes, std::vector<unsigned char>& canvas)
+                         UINT stride, std::vector<unsigned char>& canvas)
 {
     ComPtr<IWICBitmap> bitmap;
     HRESULT hr = wic->CreateBitmapFromHICON(icon, bitmap.GetAddressOf());
     if (FAILED(hr)) return hr;
+    UINT width = 0, height = 0;
+    hr = bitmap->GetSize(&width, &height);
+    if (FAILED(hr)) return hr;
+    UINT overlayStride = 0, overlayBytes = 0;
+    if (!bufferSize(width, height, overlayStride, overlayBytes))
+        return WINCODEC_ERR_BADIMAGE;
+
+    // Badge artwork has its own resolution limit, independent of the base
+    // icon. Keep its full transparent canvas and anchor it at the bottom left.
+    ComPtr<IWICBitmapSource> fitted = bitmap;
+    ComPtr<IWICFormatConverter> premultiplied;
     ComPtr<IWICBitmapScaler> scaler;
-    hr = wic->CreateBitmapScaler(scaler.GetAddressOf());
-    if (FAILED(hr)) return hr;
-    hr = scaler->Initialize(bitmap.Get(), size, size, WICBitmapInterpolationModeNearestNeighbor);
-    if (FAILED(hr)) return hr;
+    if (width > size || height > size) {
+        const UINT extent = std::max(width, height);
+        const UINT fitWidth = std::max<UINT>(1,
+            static_cast<UINT>((static_cast<std::uint64_t>(width) * size + extent / 2) / extent));
+        const UINT fitHeight = std::max<UINT>(1,
+            static_cast<UINT>((static_cast<std::uint64_t>(height) * size + extent / 2) / extent));
+        hr = wic->CreateFormatConverter(premultiplied.GetAddressOf());
+        if (FAILED(hr)) return hr;
+        hr = premultiplied->Initialize(bitmap.Get(), GUID_WICPixelFormat32bppPBGRA,
+                                      WICBitmapDitherTypeNone, nullptr, 0,
+                                      WICBitmapPaletteTypeCustom);
+        if (FAILED(hr)) return hr;
+        hr = wic->CreateBitmapScaler(scaler.GetAddressOf());
+        if (FAILED(hr)) return hr;
+        hr = scaler->Initialize(premultiplied.Get(), fitWidth, fitHeight,
+                                WICBitmapInterpolationModeFant);
+        if (FAILED(hr)) return hr;
+        fitted = scaler;
+        width = fitWidth;
+        height = fitHeight;
+        if (!bufferSize(width, height, overlayStride, overlayBytes))
+            return WINCODEC_ERR_BADIMAGE;
+    }
     ComPtr<IWICFormatConverter> straight;
     hr = wic->CreateFormatConverter(straight.GetAddressOf());
     if (FAILED(hr)) return hr;
-    hr = straight->Initialize(scaler.Get(), GUID_WICPixelFormat32bppBGRA,
+    hr = straight->Initialize(fitted.Get(), GUID_WICPixelFormat32bppBGRA,
                               WICBitmapDitherTypeNone, nullptr, 0,
                               WICBitmapPaletteTypeCustom);
     if (FAILED(hr)) return hr;
-    std::vector<unsigned char> pixels(bytes);
-    hr = straight->CopyPixels(nullptr, stride, bytes, pixels.data());
+    std::vector<unsigned char> pixels(overlayBytes);
+    hr = straight->CopyPixels(nullptr, overlayStride, overlayBytes, pixels.data());
     if (FAILED(hr)) return hr;
-    for (std::size_t i = 0; i < canvas.size(); i += 4) {
-        const unsigned alpha = pixels[i + 3], baseAlpha = canvas[i + 3];
-        const unsigned combined = alpha * 255 + baseAlpha * (255 - alpha);
-        if (!combined) continue;
-        for (unsigned channel = 0; channel < 3; ++channel)
-            canvas[i + channel] = static_cast<unsigned char>(
-                (pixels[i + channel] * alpha * 255 +
-                 canvas[i + channel] * baseAlpha * (255 - alpha) + combined / 2) / combined);
-        canvas[i + 3] = static_cast<unsigned char>((combined + 127) / 255);
-    }
+    for (UINT y = 0; y < height; ++y)
+        for (UINT x = 0; x < width; ++x) {
+            const auto* pixel = pixels.data() + static_cast<std::size_t>(y) * overlayStride + x * 4;
+            auto* base = canvas.data() + static_cast<std::size_t>(size - height + y) * stride + x * 4;
+            const unsigned alpha = pixel[3], baseAlpha = base[3];
+            const unsigned combined = alpha * 255 + baseAlpha * (255 - alpha);
+            if (!combined) continue;
+            for (unsigned channel = 0; channel < 3; ++channel)
+                base[channel] = static_cast<unsigned char>(
+                    (pixel[channel] * alpha * 255 +
+                     base[channel] * baseAlpha * (255 - alpha) + combined / 2) / combined);
+            base[3] = static_cast<unsigned char>((combined + 127) / 255);
+        }
     return S_OK;
 }
 
@@ -389,8 +438,8 @@ Result encode(IWICImagingFactory* wic, HBITMAP handle, UINT size, HICON overlay)
                     fitStride);
 
     if (overlay) {
-        hr = compositeOverlay(wic, overlay, size, stride, bytes, canvas);
-        if (FAILED(hr)) return failure("Composite shortcut overlay", hr);
+        hr = compositeOverlay(wic, overlay, size, stride, canvas);
+        if (FAILED(hr)) return failure("Composite Shell icon overlay", hr);
     }
 
     ComPtr<IStream> stream;
@@ -489,7 +538,7 @@ Result extract(const std::u16string& path, std::int32_t size, Kind kind, Overlay
         bitmap = std::move(native);
     }
     Icon overlay;
-    hr = shellOverlay(nativePath, overlays, overlay);
+    hr = shellOverlay(nativePath, static_cast<UINT>(size), overlays, overlay);
     if (FAILED(hr)) return failure("Read Shell icon overlay", hr);
     return encode(wic.Get(), bitmap.get(), static_cast<UINT>(size), overlay.get());
 }
