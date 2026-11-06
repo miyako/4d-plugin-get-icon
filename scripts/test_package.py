@@ -397,6 +397,11 @@ class SnapshotTests(unittest.TestCase):
                  "clone", "--quiet", str(self.fixture / "sdk-origin"), str(control))
         self.assertIn(b"\r\n", (control / "LICENSE.md").read_bytes())
         self.git(control, "config", "core.autocrlf", "false")
+        # The index stat cache can still mark the file clean unless its mtime
+        # is racy; move it forward so status always rehashes the CRLF bytes.
+        license = control / "LICENSE.md"
+        mtime = license.stat().st_mtime_ns + 2_000_000_000
+        os.utime(license, ns=(mtime, mtime))
         self.assertIn(b"LICENSE.md", self.git(control, "status", "--porcelain"))
         self.assertEqual((self.sdk / "LICENSE.md").read_bytes(), b"SDK license\n")
         package.snapshot()
