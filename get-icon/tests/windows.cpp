@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <commoncontrols.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -217,6 +218,94 @@ void checkShellOverlay(const fs::path& path, icons::Kind kind)
     require(noShortcut.rgba == (selected == static_cast<unsigned>(shortcut)
                 ? none.rgba : normal.rgba),
             "Shortcut suppression removed an unrelated badge or retained the arrow");
+}
+
+Image jumboOverlay(const fs::path& path, UINT size)
+{
+    SHFILEINFOW info{};
+    require(SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info),
+                SHGFI_ICON | SHGFI_ADDOVERLAYS | SHGFI_OVERLAYINDEX) != 0,
+            "Cannot query large badge reference");
+    if (info.hIcon) DestroyIcon(info.hIcon);
+    const unsigned selected = static_cast<unsigned>(info.iIcon) >> 24;
+    require(selected != 0, "Shortcut fixture has no Shell overlay");
+    ComPtr<IImageList> images;
+    check(SHGetImageList(SHIL_JUMBO, IID_PPV_ARGS(images.GetAddressOf())),
+          "Get jumbo reference image list");
+    int index = 0;
+    check(images->GetOverlayImage(selected, &index), "Get jumbo reference overlay index");
+    HICON icon = nullptr;
+    check(images->GetIcon(index, ILD_TRANSPARENT, &icon), "Get jumbo reference overlay");
+    require(icon != nullptr, "Null jumbo reference overlay");
+    ComPtr<IWICImagingFactory> wic;
+    check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                            IID_PPV_ARGS(wic.GetAddressOf())), "Create badge reference factory");
+    ComPtr<IWICBitmap> bitmap;
+    const HRESULT hr = wic->CreateBitmapFromHICON(icon, bitmap.GetAddressOf());
+    DestroyIcon(icon);
+    check(hr, "Decode jumbo reference overlay");
+    Image overlay;
+    check(bitmap->GetSize(&overlay.width, &overlay.height), "Get reference overlay dimensions");
+    require(overlay.width == overlay.height && overlay.width > 0,
+            "Expected square Shell overlay canvas");
+    ComPtr<IWICBitmapSource> source = bitmap;
+    ComPtr<IWICFormatConverter> premultiplied;
+    ComPtr<IWICBitmapScaler> scaler;
+    if (overlay.width > size) {
+        check(wic->CreateFormatConverter(premultiplied.GetAddressOf()),
+              "Create reference premultiplied converter");
+        check(premultiplied->Initialize(bitmap.Get(), GUID_WICPixelFormat32bppPBGRA,
+              WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom),
+              "Convert reference overlay to premultiplied alpha");
+        check(wic->CreateBitmapScaler(scaler.GetAddressOf()), "Create reference badge scaler");
+        check(scaler->Initialize(premultiplied.Get(), size, size, WICBitmapInterpolationModeFant),
+              "Reduce reference badge");
+        source = scaler;
+        overlay.width = overlay.height = size;
+    }
+    ComPtr<IWICFormatConverter> converter;
+    check(wic->CreateFormatConverter(converter.GetAddressOf()), "Create reference badge converter");
+    check(converter->Initialize(source.Get(), GUID_WICPixelFormat32bppRGBA,
+          WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom),
+          "Convert reference badge to straight RGBA");
+    overlay.rgba.resize(static_cast<std::size_t>(overlay.width) * overlay.height * 4);
+    check(converter->CopyPixels(nullptr, overlay.width * 4,
+          static_cast<UINT>(overlay.rgba.size()), overlay.rgba.data()), "Read reference badge pixels");
+    return overlay;
+}
+
+void checkNativeBadge(const Image& plain, const Image& decorated, const Image& overlay)
+{
+    require(overlay.width <= plain.width && overlay.height <= plain.height,
+            "Reference badge exceeds output canvas");
+    unsigned changed = 0;
+    for (UINT y = 0; y < plain.height; ++y)
+        for (UINT x = 0; x < plain.width; ++x) {
+            const auto offset = (static_cast<std::size_t>(y) * plain.width + x) * 4;
+            const auto* base = plain.rgba.data() + offset;
+            const auto* actual = decorated.rgba.data() + offset;
+            changed += !std::equal(base, base + 4, actual);
+            if (x >= overlay.width || y < plain.height - overlay.height) {
+                require(std::equal(base, base + 4, actual),
+                        "Large badge grew beyond its native bottom-left canvas");
+                continue;
+            }
+            const auto* badge = overlay.rgba.data() +
+                (static_cast<std::size_t>(y - (plain.height - overlay.height)) *
+                 overlay.width + x) * 4;
+            const double alpha = badge[3] / 255.0;
+            const double baseAlpha = base[3] / 255.0;
+            const double combined = alpha + baseAlpha * (1 - alpha);
+            for (unsigned channel = 0; channel < 4; ++channel) {
+                const int expected = channel == 3 ? static_cast<int>(std::lround(combined * 255)) :
+                    combined == 0 ? base[channel] : static_cast<int>(std::lround(
+                        (badge[channel] * alpha + base[channel] * baseAlpha * (1 - alpha)) /
+                        combined));
+                require(std::abs(int(actual[channel]) - expected) <= 1,
+                        "Badge pixels do not match the native high-resolution Shell overlay");
+            }
+        }
+    require(changed > 0, "Native badge comparison did not exercise an overlay");
 }
 
 void reject(const std::u16string& path, int size, icons::Kind kind)
@@ -460,12 +549,15 @@ void run()
         checkShellOverlay(target, kind);
     }
 
-    for (const auto& target : {file, folder, executable}) {
+    const auto largeIcon = fixtures.root / L"native-256.ico";
+    write(largeIcon, iconFixture(256, 64));
+    for (const auto& target : {file, folder, executable, largeIcon}) {
         const auto link = fixtures.root / (target.filename().wstring() + L".lnk");
-        const auto& resource = target == executable ? executable : icon;
+        const auto& resource = target == executable ? executable :
+            target == largeIcon ? largeIcon : icon;
         shortcut(link, target, resource, target == executable ? -1 : 0);
         checkShellOverlay(link, icons::Kind::file);
-        for (int size : {32, 128, 256}) {
+        for (int size : {1, 17, 32, 48, 64, 128, 256, 257, 512, 1024}) {
             const auto plain = load(link, size, icons::Kind::file, OverlayPolicy::noShortcut);
             const auto decorated = load(link, size, icons::Kind::file);
             require(load(link, size, icons::Kind::file, OverlayPolicy::none).rgba == plain.rgba,
@@ -480,15 +572,19 @@ void run()
                                     plain.rgba.data() + offset + 4,
                                     decorated.rgba.data() + offset)) {
                         ++changed;
-                        require(x < static_cast<UINT>(size) / 2 &&
+                        require(x < (static_cast<UINT>(size) + 1) / 2 &&
                                     y >= static_cast<UINT>(size) / 2,
                                 "Shortcut badge changed pixels outside the lower-left corner");
                     }
                 }
-            require(changed > 0, "Shortcut arrow is missing by default");
+            if (size >= 17)
+                require(changed > 0, "Shortcut arrow is missing by default");
+            if (size >= 128)
+                checkNativeBadge(plain, decorated, jumboOverlay(link, size));
         }
-        checkEnlarged(load(link, 32, icons::Kind::file, OverlayPolicy::noShortcut),
-                      load(link, 256, icons::Kind::file, OverlayPolicy::noShortcut));
+        if (target != largeIcon)
+            checkEnlarged(load(link, 32, icons::Kind::file, OverlayPolicy::noShortcut),
+                          load(link, 256, icons::Kind::file, OverlayPolicy::noShortcut));
     }
     const auto defaultLink = fixtures.root / L"default-executable.lnk";
     shortcut(defaultLink, executable, {});
