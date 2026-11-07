@@ -35,14 +35,22 @@ bool readPath(PA_ObjectRef object, const char16_t* name, std::u16string& path) {
     return path.find(u'\0') == std::u16string::npos;
 }
 
-bool objectPath(PA_ObjectRef object, icons::Kind kind, std::u16string& path) {
+bool readBoolean(PA_ObjectRef object, const char16_t* name, bool& value) {
+    Key key(name);
+    Variable property(PA_GetObjectProperty(object, &key.value));
+    if (PA_GetLastError() != eER_NoErr ||
+        PA_GetVariableKind(property.value) != eVK_Boolean)
+        return false;
+    value = PA_GetBooleanVariable(property.value) != 0;
+    return PA_GetLastError() == eER_NoErr;
+}
+
+bool objectPath(PA_ObjectRef object, std::u16string& path) {
     if (!object)
         return false;
-    Key kindKey(kind == icons::Kind::file ? u"isFile" : u"isFolder");
-    Variable objectKind(PA_GetObjectProperty(object, &kindKey.value));
-    if (PA_GetLastError() != eER_NoErr ||
-        PA_GetVariableKind(objectKind.value) != eVK_Boolean ||
-        !PA_GetBooleanVariable(objectKind.value) ||
+    bool file = false, folder = false;
+    if (!readBoolean(object, u"isFile", file) ||
+        !readBoolean(object, u"isFolder", folder) || file == folder ||
         !readPath(object, u"platformPath", path))
         return false;
     Variable argument(PA_CreateVariable(eVK_Unistring));
@@ -54,7 +62,7 @@ bool objectPath(PA_ObjectRef object, icons::Kind kind, std::u16string& path) {
     PA_SetLongintVariable(&format.value, 1); // fk platform path
     PA_Variable arguments[] = {argument.value, format.value};
     Variable reconstructed(PA_ExecuteCommandByID(
-        kind == icons::Kind::file ? 1566 : 1567, arguments, 2));
+        file ? 1566 : 1567, arguments, 2));
     if (PA_GetLastError() != eER_NoErr ||
         PA_GetVariableKind(reconstructed.value) != eVK_Object)
         return false;
@@ -71,7 +79,6 @@ bool objectPath(PA_ObjectRef object, icons::Kind kind, std::u16string& path) {
 struct Request {
     const std::u16string& path;
     std::int32_t size;
-    icons::Kind kind;
     icons::OverlayPolicy overlays;
     icons::Result result;
 };
@@ -79,8 +86,7 @@ struct Request {
 void nativeLoad(void* context) {
     auto& request = *static_cast<Request*>(context);
     try {
-        request.result = icons::load(request.path, request.size, request.kind,
-                                     request.overlays);
+        request.result = icons::load(request.path, request.size, request.overlays);
     } catch (const std::bad_alloc&) {
         request.result.error = "Out of memory";
     } catch (const std::length_error&) {
@@ -88,7 +94,7 @@ void nativeLoad(void* context) {
     }
 }
 
-void getIcon(PA_PluginParameters params, icons::Kind kind) {
+void getIcon(PA_PluginParameters params) {
     icons::Result result;
     try {
         // 4D materializes omitted declared Longint parameters as zero.
@@ -102,10 +108,10 @@ void getIcon(PA_PluginParameters params, icons::Kind kind) {
         std::u16string path;
         if (!icons::validSize(size)) {
             result.error = "Size must be positive and its RGBA buffer must fit WIC UINT32_MAX";
-        } else if (!objectPath(PA_GetObjectParameter(params, 1), kind, path)) {
+        } else if (!objectPath(PA_GetObjectParameter(params, 1), path)) {
             result.error = "Cannot resolve the object's native path";
         } else {
-            Request request{path, size, kind, overlays,
+            Request request{path, size, overlays,
                             {{}, "Native icon extraction did not run"}};
 #ifdef __APPLE__
             // Ask 4D to switch context, never synchronously dispatch onto Cocoa.
@@ -146,7 +152,6 @@ void getIcon(PA_PluginParameters params, icons::Kind kind) {
 
 void PluginMain(PA_long32 selector, PA_PluginParameters params) {
     switch (selector) {
-        case 1: getIcon(params, icons::Kind::file); break;
-        case 2: getIcon(params, icons::Kind::folder); break;
+        case 1: getIcon(params); break;
     }
 }

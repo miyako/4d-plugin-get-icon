@@ -33,7 +33,7 @@ bool aliasHasCustomIcon(NSString* path, bool& custom) {
 }
 }
 
-Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPolicy overlays) {
+Result load(const std::u16string& path, std::int32_t size, OverlayPolicy overlays) {
     @autoreleasepool {
         if (![NSThread isMainThread])
             return {{}, "AppKit extraction requires the Cocoa main thread"};
@@ -47,14 +47,10 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPol
         NSString* file = [[NSString alloc] initWithCharacters:
             reinterpret_cast<const unichar*>(path.data()) length:path.size()];
         // 4D Folder paths end in '/', but a Finder folder alias is a file on disk.
-        if (kind == Kind::folder) {
-            while (file.length > 1 && [file hasSuffix:@"/"])
-                file = [file substringToIndex:file.length - 1];
-        }
-        BOOL directory = NO;
-        if (![[NSFileManager defaultManager] fileExistsAtPath:file isDirectory:&directory])
-            return {{}, "Path is missing or has the wrong file/folder kind"};
-        const bool kindMismatch = bool(directory) != (kind == Kind::folder);
+        while (file.length > 1 && [file hasSuffix:@"/"])
+            file = [file substringToIndex:file.length - 1];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:file])
+            return {{}, "Path is missing"};
         NSImage* badge = nil;
         {
             NSURL* url = [NSURL fileURLWithPath:file];
@@ -62,8 +58,6 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPol
             NSError* error = nil;
             if (![url getResourceValue:&alias forKey:NSURLIsAliasFileKey error:&error])
                 return {{}, "Cannot read Finder alias metadata"};
-            if (kindMismatch && (kind != Kind::folder || !alias.boolValue))
-                return {{}, "Path is missing or has the wrong file/folder kind"};
             if (alias.boolValue) {
                 bool custom = false;
                 if (overlays == OverlayPolicy::system &&
@@ -74,10 +68,8 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPol
                             NSURLBookmarkResolutionWithoutMounting error:&error];
                 if (!target)
                     return {{}, "Cannot resolve Finder alias target"};
-                if (kindMismatch &&
-                    (![[NSFileManager defaultManager] fileExistsAtPath:target.path
-                        isDirectory:&directory] || !directory))
-                    return {{}, "Finder alias target is missing or is not a folder"};
+                if (![[NSFileManager defaultManager] fileExistsAtPath:target.path])
+                    return {{}, "Finder alias target is missing"};
                 if (overlays != OverlayPolicy::system || !custom)
                     file = target.path;
                 if (overlays == OverlayPolicy::system && !custom) {

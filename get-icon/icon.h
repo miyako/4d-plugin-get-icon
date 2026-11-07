@@ -5,7 +5,6 @@
 #include <vector>
 
 namespace icons {
-enum class Kind { file, folder };
 enum class OverlayPolicy { system, noShortcut, none };
 struct Result {
     std::vector<unsigned char> png;
@@ -15,6 +14,6 @@ struct Result {
 inline bool validSize(std::int32_t size) {
     return size > 0 && std::uint64_t(size) * std::uint64_t(size) * 4 <= UINT32_MAX;
 }
-Result load(const std::u16string& path, std::int32_t size, Kind kind,
+Result load(const std::u16string& path, std::int32_t size,
             OverlayPolicy overlays = OverlayPolicy::system);
 }
