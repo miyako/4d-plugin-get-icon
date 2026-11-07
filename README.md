@@ -8,20 +8,19 @@ A native 4D plugin returning file and folder icons as **PNG-backed Pictures with
 
 - 4D 21.1 or later.
 - macOS with AppKit, or Windows 10/11 (x64).
-- Commands are cooperative-only (`threadSafe: false`).
+- The command is cooperative-only (`threadSafe: false`).
 
-## Commands
+## Command
 
 ```4d
-$picture:=File Get icon($file {; $size {; $options}})
-$picture:=Folder Get icon($folder {; $size {; $options}})
+$picture:=Path Get icon($entry {; $size {; $options}})
 ```
 
-Manifest signatures: `File Get icon(&J;&L;&L):P` and `Folder Get icon(&J;&L;&L):P`.
+Manifest signature: `Path Get icon(&J;&L;&L):P`.
 
 | Parameter | Type | Meaning |
 |---|---|---|
-| `$file` / `$folder` | Object | Existing `4D.File` / `4D.Folder` |
+| `$entry` | Object | `4D.File` or `4D.Folder` referencing an existing filesystem entry; not a Text path |
 | `$size` | Integer | Square output size in physical pixels; optional, defaults to **256** |
 | `$options` | Integer | Optional overlay policy; see constants below. Omitted, **0**, or an unrecognized value uses the system-selected overlay |
 | `$picture` | Picture | Encoded PNG on success; genuinely empty Picture on failure |
@@ -30,13 +29,13 @@ Manifest signatures: `File Get icon(&J;&L;&L):P` and `Folder Get icon(&J;&L;&L):
 var $file; $folder : Object
 var $picture : Picture
 $file:=File("/LOGS/report.pdf")
-$picture:=File Get icon($file)
+$picture:=Path Get icon($file)
 $folder:=Folder(fk database folder)
-$picture:=Folder Get icon($folder; 128)
+$picture:=Path Get icon($folder; 128)
 // For a Windows .lnk file or macOS Finder alias:
-// $picture:=File Get icon($shortcut; 256; Icon No shortcut arrow)
+// $picture:=Path Get icon($shortcut; 256; Icon No shortcut arrow)
 // Omit all supported overlays, including non-shortcut Shell status badges:
-// $picture:=File Get icon($file; 256; Icon No overlays)
+// $picture:=Path Get icon($file; 256; Icon No overlays)
 If (Picture size($picture)=0)
     // Missing path, invalid size, or native extraction/encoding failure
 End if
@@ -52,12 +51,15 @@ Windows Explorer draws the UAC shield itself rather than through the overlay mec
 
 `Icon No shortcut arrow` (**1**) suppresses only the system shortcut overlay, retaining an unrelated Shell-selected badge or UAC shield even on a shortcut. `Icon No overlays` (**2**) skips all separately composited Shell overlays and the UAC shield. Neither option removes decorations already embedded in the base icon artwork. These are mutually exclusive policies, not combinable bit flags; unrecognized values retain the default policy.
 
-**macOS:** the default keeps Finder's native icon. Both suppression options resolve Finder aliases and use their target's icon (failing explicitly if the target cannot be resolved). Finder Sync extension badges, cloud status, and lock decorations are not supported separately by the current `NSWorkspace` backend.
+**macOS:** Finder aliases are resolved without UI or volume mounting. By default, aliases without their own custom icon use the target's native artwork with the system alias badge composited over it; this avoids the generic document artwork that `NSWorkspace` can return for a folder alias. An alias-specific custom icon is retained through `NSWorkspace` instead. Both suppression options use the target's icon. Unresolvable aliases fail explicitly. Finder Sync extension badges, cloud status, and lock decorations are not supported separately by the current backend.
 
-Pass a Windows `.lnk` file to **File Get icon**, even when it points to a folder. On macOS, **File Get icon** accepts Finder aliases to files or folders; **Folder Get icon** also accepts a `4D.Folder` referencing an alias to a folder (for example, `Folder($alias.path+"/")`). The trailing folder separator is removed for native lookup, and the alias target must resolve to an existing folder without UI or mounting volumes. The default still retrieves the alias's own Finder icon, including its arrow; both suppression options use the target icon. An alias to a file is rejected by **Folder Get icon**.
+The object type is used only to convert the path with 4D's matching constructor; it does not constrain the on-disk kind. Files, folders, Finder aliases, and Windows shortcuts all use the same command. A `4D.Folder` may reference a file or alias (for example, `Folder($alias.path+"/")`), and a `4D.File` may reference a directory using its separator-free native path. Trailing separators are removed before native lookup, preserving filesystem roots. On Windows, the actual filesystem attributes control file-only icon metadata and UAC shield handling, not the caller's object type. Shortcuts to files and folders are handled identically; an existing broken `.lnk` may still have a Shell-provided icon. No shortcut resolution UI, search, or link tracking runs.
 
-On Windows, **Folder Get icon** likewise accepts a `4D.Folder` referencing a `.lnk` shortcut to a folder (for example, `Folder($shortcut.path+"/")`, whose platform path ends in `\`). The trailing separator is removed (drive roots are preserved), and the shortcut's stored target must be an existing folder; the shortcut is not resolved, so no UI, search, or link tracking runs. The result is identical to **File Get icon** on the same `.lnk`, including the default arrow and both suppression options. Shortcuts to files, broken shortcuts, and other files are rejected.
-Failures (including nonexistent/deleted paths, wrong file/folder kind, allocation or encoding errors) return `PA_CreatePicture(nullptr, 0)`, not a transparent PNG. The plugin logs a diagnostic to standard error. Returned pictures belong to 4D.
+Failures (including nonexistent/deleted paths, invalid objects, allocation or encoding errors) return `PA_CreatePicture(nullptr, 0)`, not a transparent PNG. The plugin logs a diagnostic to standard error. Returned pictures belong to 4D.
+
+### Migration from 1.x
+
+Version **2.0.0** replaces `File Get icon` and `Folder Get icon` with **Path Get icon** on both platforms. Replace both old command names in your 4D methods and recompile compiled projects. Arguments, default sizing, overlay constants, and PNG output remain unchanged. The old commands are removed, not retained under deprecated names. File/folder-kind mismatch rejection is intentionally removed.
 
 ## Constants
 
@@ -73,6 +75,8 @@ The **Icon options** theme exposes the following plugin constants through `const
 macOS uses `NSWorkspace.iconForFile:` and a cleared 8-bit sRGB RGBA CoreGraphics bitmap at the requested dimensions, nearest-neighbor enlargement/high-quality reduction, and ImageIO PNG encoding. It does not mutate the cached `NSImage` or the current AppKit graphics context. One `PA_RunInMainProcess` callback covers native extraction, PNG encoding, SDK picture creation (including empty results), and error-path picture disposal. Parameter/property access stays in the caller's language context, and the completed picture is returned there without disposal. This boundary also applies to calls from listbox column data-source expressions. Although the SDK marks picture creation as thread-safe, it is kept in the same main-process cycle as extraction to avoid splitting the graphics lifecycle across contexts.
 
 4D's main process and the Cocoa main thread are not interchangeable guarantees. The native backend separately verifies Cocoa main-thread execution before touching AppKit and reports an error if it is unavailable; it never synchronously dispatches onto the main queue. This is threading hardening, not proof that a reported intermittent crash has been resolved.
+
+Alias-specific custom artwork is detected through the native Finder catalog flag; the deprecated catalog API is used because `NSURLCustomIconKey` is documented as unimplemented. For aliases without custom artwork, the target icon is rendered first, then the installed system `AliasBadgeIcon.icns` from `/System/Library/CoreServices/CoreTypes.bundle` is drawn over the complete output canvas with high-quality filtering. The badge supplies its own lower-left placement and transparent margins; the plugin does not approximate or redistribute Apple's icon assets. This resource location is a macOS implementation dependency, not a public API contract: a missing or unusable badge returns an explicit failure.
 
 Windows resolves the actual UTF-16 path with `SHCreateItemFromParsingName` and requests `IShellItemImageFactory::GetImage` with `SIIGBF_ICONONLY`, leaving enlargement to WIC rather than Shell interpolation. `SHGetFileInfoW` with `SHGFI_ADDOVERLAYS | SHGFI_OVERLAYINDEX` supplies the Shell-selected overlay for any item. The overlay uses the smallest system image-list canvas that covers the requested size (small, large, extra-large, or jumbo), or the largest available canvas for bigger requests. Actual list dimensions are queried rather than assumed from screen DPI. Unlike the base icon, the overlay is never enlarged beyond that native canvas: a jumbo overlay normally retains its 256-pixel canvas on 512-pixel and larger outputs. Its complete transparent canvas is anchored at the lower left, without cropping the badge artwork; reductions use high-quality premultiplied-alpha filtering. This avoids magnifying the 32-pixel badge into a coarse, oversized arrow. The badge is alpha-composited after sizing the base icon. Shortcut-only suppression compares the selected overlay index with `SHGetIconOverlayIndexW`'s standard link overlay, rather than suppressing every badge on a link. Extraction/encoding uses native COM and WIC in memory, without temporary files, thumbnails, background-color flags, or GDI+ bitmap conversion.
 
@@ -104,9 +108,9 @@ The manifest uses a project-local ID (`31071`), not a claim of a registered prod
 
 ## Tests and CI
 
-Native tests exercise pixel dimensions, PNG alpha, Unicode paths, custom icons, legacy source artwork, overlay policies, invalid inputs, and repeated extraction. Windows regressions compare overlay policies with live Shell selection for ordinary files, folders, and shortcuts, and check exact 4×4/8×8 source-pixel replication and lower-left shortcut compositing for links to files and folders. Large-badge regressions compare composed pixels with the native jumbo overlay at 128, 256, 257, 512, and 1024 pixels, using both legacy 32-pixel and native 256-pixel base icons; they verify that larger outputs do not enlarge the badge. Further regressions cover Windows Installer style ICO data named `.exe`, and UAC shields for `requireAdministrator` manifests, compatibility-layer elevation, and run-as-administrator shortcuts (restricted to the lower-right quadrant and removed by `Icon No overlays`). Third-party status overlays require their provider to be installed; tests do not install handlers or change system associations. The tutorial-derived 4D test project exercises both commands, both named overlay constants, unrecognized-option defaults, default sizing, decoded PNG dimensions, repeated calls, and `Picture size(...)=0` on failures.
+Native tests exercise pixel dimensions, PNG alpha, Unicode paths, custom icons, legacy source artwork, overlay policies, invalid inputs, and repeated extraction. Windows regressions compare overlay policies with live Shell selection for ordinary files, folders, and shortcuts, and check exact 4×4/8×8 source-pixel replication and lower-left shortcut compositing for links to files and folders. Large-badge regressions compare composed pixels with the native jumbo overlay at 128, 256, 257, 512, and 1024 pixels, using both legacy 32-pixel and native 256-pixel base icons; they verify that larger outputs do not enlarge the badge. Further regressions cover Windows Installer style ICO data named `.exe`, and UAC shields for `requireAdministrator` manifests, compatibility-layer elevation, and run-as-administrator shortcuts (restricted to the lower-right quadrant and removed by `Icon No overlays`). Third-party status overlays require their provider to be installed; tests do not install handlers or change system associations. The tutorial-derived 4D test project exercises the unified command with both object types, both named overlay constants, unrecognized-option defaults, default sizing, decoded PNG dimensions, repeated calls, and `Picture size(...)=0` on failures.
 
-macOS regressions pass Finder folder aliases as both files and folders, covering trailing separators, the default arrow, both suppression policies, and rejection of file-target aliases passed as folders. Windows regressions pass folder shortcuts to **Folder Get icon** with and without a trailing separator and compare every overlay policy with the `.lnk` file result; shortcuts to files, broken shortcuts, plain files, and drive roots are covered. The 4D integration suite exercises this path on both platforms (extensionless aliases on macOS, `.lnk` shortcuts on Windows).
+macOS regressions pass Finder aliases to files and folders with and without trailing separators, covering the default arrow and both suppression policies. They compare pixels outside the badge with the target's actual artwork, including ordinary folders, target custom icons, and alias-specific custom icons, rather than treating a generic document icon with an arrow as success. Windows regressions pass folder shortcuts to **Path Get icon** with and without a trailing separator and compare every overlay policy with the `.lnk` file result; shortcuts to files, broken shortcuts, plain files, and drive roots are covered. The 4D integration suite exercises this path on both platforms (extensionless aliases on macOS, `.lnk` shortcuts on Windows).
 
 Run the integration suite with a matching [tool4d](https://developer.4d.com/docs/Admin/cli/) runtime (no license required):
 

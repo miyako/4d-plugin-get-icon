@@ -64,12 +64,12 @@ void reset() {
 }
 
 Request request(const std::u16string& path, const char* error = "") {
-    return {path, 32, icons::Kind::folder, icons::OverlayPolicy::system, {{}, error}};
+    return {path, 32, icons::OverlayPolicy::system, {{}, error}};
 }
 }
 
 namespace icons {
-Result load(const std::u16string&, std::int32_t, Kind, OverlayPolicy) {
+Result load(const std::u16string&, std::int32_t, OverlayPolicy) {
     require(inMain, "Native extraction escaped main-process callback");
     ++loads;
     return failLoad ? Result{{}, "Simulated native failure"} : Result{{1, 2, 3}, {}};

@@ -3,13 +3,8 @@
     "id": 31071,
     "commands": [
         {
-            "theme": "File icons",
-            "syntax": "File Get icon(&J;&L;&L):P",
-            "threadSafe": false
-        },
-        {
-            "theme": "File icons",
-            "syntax": "Folder Get icon(&J;&L;&L):P",
+            "theme": "Filesystem icons",
+            "syntax": "Path Get icon(&J;&L;&L):P",
             "threadSafe": false
         }
     ]

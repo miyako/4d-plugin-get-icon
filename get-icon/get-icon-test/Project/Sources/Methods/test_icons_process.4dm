@@ -6,8 +6,8 @@ var $i; $offset; $width; $height : Integer
 var $blob : Blob
 $folder:=Folder(fk database folder)
 For ($i; 1; 100)
-    $picture:=Folder Get icon($folder; 256)
-    $small:=Folder Get icon($folder; 31)
+    $picture:=Path Get icon($folder; 256)
+    $small:=Path Get icon($folder; 31)
     $native:=$folder.getIcon(256)
     ASSERT(Picture size($picture)>0; "Repeated large icon in a cooperative process")
     ASSERT(Picture size($native)>0; "Native icon interleaved with plugin extraction")
