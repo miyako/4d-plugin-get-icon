@@ -54,7 +54,7 @@ Windows Explorer draws the UAC shield itself rather than through the overlay mec
 
 **macOS:** the default keeps Finder's native icon. Both suppression options resolve Finder aliases and use their target's icon (failing explicitly if the target cannot be resolved). Finder Sync extension badges, cloud status, and lock decorations are not supported separately by the current `NSWorkspace` backend.
 
-Pass a Windows `.lnk` file or macOS Finder alias to **File Get icon**, even when it points to a folder.
+Pass a Windows `.lnk` file to **File Get icon**, even when it points to a folder. On macOS, **File Get icon** accepts Finder aliases to files or folders; **Folder Get icon** also accepts a `4D.Folder` referencing an alias to a folder (for example, `Folder($alias.path+"/")`). The trailing folder separator is removed for native lookup, and the alias target must resolve to an existing folder without UI or mounting volumes. The default still retrieves the alias's own Finder icon, including its arrow; both suppression options use the target icon. An alias to a file is rejected by **Folder Get icon**.
 
 Failures (including nonexistent/deleted paths, wrong file/folder kind, allocation or encoding errors) return `PA_CreatePicture(nullptr, 0)`, not a transparent PNG. The plugin logs a diagnostic to standard error. Returned pictures belong to 4D.
 
@@ -102,6 +102,8 @@ The manifest uses a project-local ID (`31071`), not a claim of a registered prod
 ## Tests and CI
 
 Native tests exercise pixel dimensions, PNG alpha, Unicode paths, custom icons, legacy source artwork, overlay policies, invalid inputs, and repeated extraction. Windows regressions compare overlay policies with live Shell selection for ordinary files, folders, and shortcuts, and check exact 4×4/8×8 source-pixel replication and lower-left shortcut compositing for links to files and folders. Large-badge regressions compare composed pixels with the native jumbo overlay at 128, 256, 257, 512, and 1024 pixels, using both legacy 32-pixel and native 256-pixel base icons; they verify that larger outputs do not enlarge the badge. Further regressions cover Windows Installer style ICO data named `.exe`, and UAC shields for `requireAdministrator` manifests, compatibility-layer elevation, and run-as-administrator shortcuts (restricted to the lower-right quadrant and removed by `Icon No overlays`). Third-party status overlays require their provider to be installed; tests do not install handlers or change system associations. The tutorial-derived 4D test project exercises both commands, both named overlay constants, unrecognized-option defaults, default sizing, decoded PNG dimensions, repeated calls, and `Picture size(...)=0` on failures.
+
+macOS regressions pass Finder folder aliases as both files and folders, covering trailing separators, the default arrow, both suppression policies, and rejection of file-target aliases passed as folders. The 4D integration suite exercises this path with extensionless aliases.
 
 Run the integration suite with a matching [tool4d](https://developer.4d.com/docs/Admin/cli/) runtime (no license required):
 

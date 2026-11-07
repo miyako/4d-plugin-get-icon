@@ -128,6 +128,13 @@ int main() try {
             NSString* alias = [target stringByAppendingString:@".alias"];
             require([NSURL writeBookmarkData:bookmark toURL:[NSURL fileURLWithPath:alias]
                 options:0 error:nil], "Cannot write Finder alias");
+            NSString* folderPath = [alias stringByAppendingString:@"/"];
+            if ([target isEqual:file]) {
+                for (auto policy : {icons::OverlayPolicy::system,
+                                    icons::OverlayPolicy::noShortcut, icons::OverlayPolicy::none})
+                    require(!icons::load(nativePath(folderPath), 256, icons::Kind::folder, policy),
+                            "Alias to a file accepted as a folder");
+            }
             for (int size : {32, 128, 256}) {
                 NSBitmapImageRep* plain = decode(icons::load(nativePath(alias), size,
                     icons::Kind::file, icons::OverlayPolicy::noShortcut), size);
@@ -143,6 +150,19 @@ int main() try {
                     icons::Kind::file), size);
                 require(raster(decorated.CGImage) != raster(plain.CGImage),
                         "Finder alias arrow is missing by default");
+                if ([target isEqual:folder]) {
+                    for (NSString* input in @[alias, folderPath,
+                                              [folderPath stringByAppendingString:@"/"]]) {
+                        for (auto policy : {icons::OverlayPolicy::system,
+                                            icons::OverlayPolicy::noShortcut, icons::OverlayPolicy::none}) {
+                            NSBitmapImageRep* folderIcon = decode(icons::load(nativePath(input), size,
+                                icons::Kind::folder, policy), size);
+                            require(raster(folderIcon.CGImage) == raster(
+                                policy == icons::OverlayPolicy::system ? decorated.CGImage : plain.CGImage),
+                                "Folder alias path changed the icon or its overlay policy");
+                        }
+                    }
+                }
             }
         }
         bool rejected = false;
@@ -153,8 +173,17 @@ int main() try {
         require(rejected, "Off-main AppKit call not rejected");
         require([fm removeItemAtPath:file error:nil], "Cannot delete fixture");
         require(!icons::load(nativePath(file), 256, icons::Kind::file), "Deleted file has icon");
+        require([fm removeItemAtPath:folder error:nil], "Cannot delete folder target");
+        NSString* brokenFolderAlias = [[folder stringByAppendingString:@".alias"]
+            stringByAppendingString:@"/"];
+        for (auto policy : {icons::OverlayPolicy::system,
+                            icons::OverlayPolicy::noShortcut, icons::OverlayPolicy::none}) {
+            auto result = icons::load(nativePath(brokenFolderAlias), 256, icons::Kind::folder, policy);
+            require(!result && !result.error.empty(),
+                    "Broken folder alias must fail with an explicit diagnostic");
+        }
         require([fm removeItemAtPath:root error:nil], "Cannot clean fixtures");
-        std::puts("PASS: native dimensions, alpha, Unicode, custom 32px icons, failures, repeated calls");
+        std::puts("PASS: native dimensions, alpha, Unicode, custom 32px icons, folder aliases, failures, repeated calls");
     }
     return 0;
 } catch (const std::exception& error) {

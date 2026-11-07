@@ -25,23 +25,35 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPol
             return {{}, "Invalid path"};
         NSString* file = [[NSString alloc] initWithCharacters:
             reinterpret_cast<const unichar*>(path.data()) length:path.size()];
+        // 4D Folder paths end in '/', but a Finder folder alias is a file on disk.
+        if (kind == Kind::folder) {
+            while (file.length > 1 && [file hasSuffix:@"/"])
+                file = [file substringToIndex:file.length - 1];
+        }
         BOOL directory = NO;
-        if (![[NSFileManager defaultManager] fileExistsAtPath:file isDirectory:&directory] ||
-            bool(directory) != (kind == Kind::folder))
+        if (![[NSFileManager defaultManager] fileExistsAtPath:file isDirectory:&directory])
             return {{}, "Path is missing or has the wrong file/folder kind"};
-        if (overlays != OverlayPolicy::system) {
+        const bool kindMismatch = bool(directory) != (kind == Kind::folder);
+        if (kindMismatch || overlays != OverlayPolicy::system) {
             NSURL* url = [NSURL fileURLWithPath:file];
             NSNumber* alias = nil;
             NSError* error = nil;
             if (![url getResourceValue:&alias forKey:NSURLIsAliasFileKey error:&error])
                 return {{}, "Cannot read Finder alias metadata"};
+            if (kindMismatch && (kind != Kind::folder || !alias.boolValue))
+                return {{}, "Path is missing or has the wrong file/folder kind"};
             if (alias.boolValue) {
                 NSURL* target = [NSURL URLByResolvingAliasFileAtURL:url
                     options:NSURLBookmarkResolutionWithoutUI |
                             NSURLBookmarkResolutionWithoutMounting error:&error];
                 if (!target)
                     return {{}, "Cannot resolve Finder alias target"};
-                file = target.path;
+                if (kindMismatch &&
+                    (![[NSFileManager defaultManager] fileExistsAtPath:target.path
+                        isDirectory:&directory] || !directory))
+                    return {{}, "Finder alias target is missing or is not a folder"};
+                if (overlays != OverlayPolicy::system)
+                    file = target.path;
             }
         }
         NSImage* image = [[NSWorkspace sharedWorkspace] iconForFile:file];

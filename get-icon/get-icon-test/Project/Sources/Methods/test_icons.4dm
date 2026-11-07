@@ -3,9 +3,9 @@ var $folder; $file; $missing : Object
 var $picture : Picture
 var $width; $height; $offset; $size; $i : Integer
 var $blob : Blob
-var $target; $alias : Object
+var $target; $alias; $folderAlias : Object
 var $variants : Collection
-var $default : Text
+var $default; $aliasName : Text
 ASSERT(Icon No shortcut arrow=1; "Shortcut suppression constant must be Longint 1")
 ASSERT(Icon No overlays=2; "All-overlay suppression constant must be Longint 2")
 $folder:=Folder(fk database folder)
@@ -41,7 +41,11 @@ For each ($size; [1; 31; 32; 127; 256])
 End for each
 
 For each ($target; [$file; $folder])
-    $alias:=$target.createAlias(Folder(fk resources folder); "icon-test-shortcut-"+Generate UUID+".lnk")
+    $aliasName:="icon-test-shortcut-"+Generate UUID
+    If (Not(Is macOS))
+        $aliasName:=$aliasName+".lnk"
+    End if
+    $alias:=$target.createAlias(Folder(fk resources folder); $aliasName)
     ASSERT($alias.isAlias; "Shortcut fixture must be a native alias")
     For each ($size; [32; 128; 256])
         $picture:=File Get icon($alias; $size)
@@ -54,10 +58,33 @@ For each ($target; [$file; $folder])
             ASSERT(Picture size($picture)>0; "Explicit shortcut option")
             PICTURE TO BLOB($picture; $blob; ".png")
             $variants.push(Generate digest($blob; SHA256 digest))
+            If (Is macOS)
+                $folderAlias:=Folder($alias.path+"/")
+                $picture:=Folder Get icon($folderAlias; $size; $i)
+                If ($target.isFolder)
+                    ASSERT(Picture size($picture)>0; "Finder folder alias must have a folder icon")
+                    PICTURE TO BLOB($picture; $blob; ".png")
+                    ASSERT(Generate digest($blob; SHA256 digest)=$variants[$variants.length-1]; "Folder alias must preserve the File alias icon and overlay policy")
+                    $offset:=16
+                    $width:=BLOB to longint($blob; Macintosh byte ordering; $offset)
+                    $height:=BLOB to longint($blob; Macintosh byte ordering; $offset)
+                    ASSERT(($width=$size) & ($height=$size); "Exact folder alias PNG dimensions")
+                Else
+                    ASSERT(Picture size($picture)=0; "Alias to a file must not be accepted as a folder")
+                End if
+            End if
         End for each
         ASSERT(($variants[0]=$default) & ($variants[3]=$default); "Zero and unknown options preserve default overlays")
         ASSERT($variants[1]=$variants[2]; "Both suppression options remove the shortcut arrow")
         ASSERT($variants[1]#$default; "Default shortcut arrow must change the picture")
+        If (Is macOS & $target.isFolder)
+            $picture:=Folder Get icon($folderAlias; $size)
+            ASSERT(Picture size($picture)>0; "Folder alias with omitted overlay option")
+            PICTURE TO BLOB($picture; $blob; ".png")
+            ASSERT(Generate digest($blob; SHA256 digest)=$default; "Default folder alias arrow must be preserved")
+            $picture:=$folderAlias.getIcon($size)
+            ASSERT(Picture size($picture)>0; "Native getIcon comparison fixture")
+        End if
     End for each
     $alias.delete()
 End for each
