@@ -18,7 +18,7 @@ if(APPLE)
     set(CMAKE_OBJCXX_STANDARD 20)
     add_library(icon-native STATIC icon-macos.mm)
     target_compile_options(icon-native PRIVATE -fobjc-arc)
-    target_link_libraries(icon-native PUBLIC "-framework AppKit" "-framework ImageIO")
+    target_link_libraries(icon-native PUBLIC "-framework AppKit" "-framework CoreServices" "-framework ImageIO")
     add_library(get-icon MODULE ${PLUGIN_SOURCES} manifest.json constants.xlf)
     set_source_files_properties(manifest.json constants.xlf PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
     set_target_properties(get-icon PROPERTIES
