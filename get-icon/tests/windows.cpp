@@ -187,10 +187,9 @@ Image decode(const icons::Result& result)
     return image;
 }
 
-Image load(const fs::path& path, int size, icons::Kind kind,
-           OverlayPolicy overlays = OverlayPolicy::system)
+Image load(const fs::path& path, int size, OverlayPolicy overlays = OverlayPolicy::system)
 {
-    Image image = decode(icons::load(path.u16string(), size, kind, overlays));
+    Image image = decode(icons::load(path.u16string(), size, overlays));
     require(image.width == static_cast<UINT>(size) && image.height == static_cast<UINT>(size),
             "PNG dimensions do not exactly match the requested size");
     bool visible = false;
@@ -200,7 +199,32 @@ Image load(const fs::path& path, int size, icons::Kind kind,
     return image;
 }
 
-void checkShellOverlay(const fs::path& path, icons::Kind kind)
+void checkPathRepresentations(const fs::path& path, int size, bool allowShellFailure = false)
+{
+    for (auto policy : {OverlayPolicy::system, OverlayPolicy::noShortcut,
+                        OverlayPolicy::none}) {
+        if (allowShellFailure) {
+            const auto result = icons::load(path.u16string(), size, policy);
+            if (!result) {
+                require(result.png.empty() && !result.error.empty(),
+                        "Broken shortcut did not return an explicit failure");
+                for (const auto& suffix : {u"\\", u"/", u"\\\\", u"//", u"\\/"}) {
+                    const auto alternate = icons::load(path.u16string() + suffix, size, policy);
+                    require(!alternate && alternate.png.empty() && !alternate.error.empty(),
+                            "Trailing separators changed the broken shortcut result");
+                }
+                continue;
+            }
+        }
+        const auto expected = load(path, size, policy);
+        for (const auto& suffix : {u"\\", u"/", u"\\\\", u"//", u"\\/"})
+            require(load(fs::path(path.u16string() + suffix), size, policy).rgba ==
+                        expected.rgba,
+                    "Trailing separators changed the path icon");
+    }
+}
+
+void checkShellOverlay(const fs::path& path)
 {
     SHFILEINFOW info{};
     require(SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info),
@@ -208,9 +232,9 @@ void checkShellOverlay(const fs::path& path, icons::Kind kind)
             "Cannot query reference Shell overlay");
     if (info.hIcon) DestroyIcon(info.hIcon);
     const unsigned selected = static_cast<unsigned>(info.iIcon) >> 24;
-    const auto normal = load(path, 128, kind);
-    const auto noShortcut = load(path, 128, kind, OverlayPolicy::noShortcut);
-    const auto none = load(path, 128, kind, OverlayPolicy::none);
+    const auto normal = load(path, 128);
+    const auto noShortcut = load(path, 128, OverlayPolicy::noShortcut);
+    const auto none = load(path, 128, OverlayPolicy::none);
     require((normal.rgba != none.rgba) == (selected != 0),
             "Default policy did not match the Shell-selected overlay");
     const int shortcut = SHGetIconOverlayIndexW(nullptr, IDO_SHGIOI_LINK);
@@ -308,9 +332,9 @@ void checkNativeBadge(const Image& plain, const Image& decorated, const Image& o
     require(changed > 0, "Native badge comparison did not exercise an overlay");
 }
 
-void reject(const std::u16string& path, int size, icons::Kind kind)
+void reject(const std::u16string& path, int size)
 {
-    const auto result = icons::load(path, size, kind);
+    const auto result = icons::load(path, size);
     require(!result && result.png.empty() && !result.error.empty(),
             "Invalid input did not return an explicit failure");
 }
@@ -523,19 +547,21 @@ void checkElevation(const fs::path& root, const fs::path& executable)
     const auto highest = root / L"highest.exe";
     executableIcon(highest, "highestAvailable");
     for (int size : {17, 32, 48, 128, 256, 512}) {
-        const auto plain = load(executable, size, icons::Kind::file);
-        const auto none = load(elevated, size, icons::Kind::file, OverlayPolicy::none);
+        const auto plain = load(executable, size);
+        const auto none = load(elevated, size, OverlayPolicy::none);
         require(none.rgba == plain.rgba, "No-overlays policy did not remove the UAC shield");
-        const auto shielded = load(elevated, size, icons::Kind::file);
+        const auto shielded = load(elevated, size);
         checkShield(plain, shielded, uac);
-        require(load(elevated, size, icons::Kind::file, OverlayPolicy::noShortcut).rgba ==
+        require(load(elevated, size, OverlayPolicy::noShortcut).rgba ==
                     shielded.rgba,
                 "Suppressing shortcut arrows removed the UAC shield");
-        require(load(invoker, size, icons::Kind::file).rgba == plain.rgba,
+        require(load(invoker, size).rgba == plain.rgba,
                 "asInvoker executable received a UAC shield");
-        const auto maybe = load(highest, size, icons::Kind::file);
+        const auto maybe = load(highest, size);
         require(maybe.rgba == plain.rgba || maybe.rgba == shielded.rgba,
                 "highestAvailable executable received an unexpected decoration");
+        for (const auto& path : {elevated, invoker, highest})
+            checkPathRepresentations(path, size);
     }
 
     const auto elevatedLink = root / L"elevated-target.lnk";
@@ -544,11 +570,12 @@ void checkElevation(const fs::path& root, const fs::path& executable)
     runAsShortcut(runAsLink, executable);
     for (const auto& link : {elevatedLink, runAsLink})
         for (int size : {32, 256}) {
-            const auto none = load(link, size, icons::Kind::file, OverlayPolicy::none);
-            const auto shielded = load(link, size, icons::Kind::file, OverlayPolicy::noShortcut);
+            const auto none = load(link, size, OverlayPolicy::none);
+            const auto shielded = load(link, size, OverlayPolicy::noShortcut);
             checkShield(none, shielded, uac);
-            require(load(link, size, icons::Kind::file).rgba != shielded.rgba,
+            require(load(link, size).rgba != shielded.rgba,
                     "Elevated shortcut is missing its arrow");
+            checkPathRepresentations(link, size);
         }
 
     // The compatibility "Run as administrator" setting is keyed by full path.
@@ -567,8 +594,8 @@ void checkElevation(const fs::path& root, const fs::path& executable)
             L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers",
             name.c_str()); }
     } cleanup{name};
-    checkShield(load(executable, 256, icons::Kind::file),
-                load(layered, 256, icons::Kind::file), uac);
+    checkShield(load(executable, 256), load(layered, 256), uac);
+    checkPathRepresentations(layered, 256);
 }
 
 void run()
@@ -578,9 +605,9 @@ void run()
     const auto folder = fixtures.root / L"\u30d5\u30a9\u30eb\u30c0";
     write(file, {'t', 'e', 's', 't'});
     require(fs::create_directory(folder), "Create Unicode folder failed");
-    checkShellOverlay(file, icons::Kind::file);
-    checkShellOverlay(folder, icons::Kind::folder);
-    const auto invalidPolicy = icons::load(file.u16string(), 32, icons::Kind::file,
+    checkShellOverlay(file);
+    checkShellOverlay(folder);
+    const auto invalidPolicy = icons::load(file.u16string(), 32,
                                           static_cast<OverlayPolicy>(99));
     require(!invalidPolicy && invalidPolicy.png.empty() && !invalidPolicy.error.empty(),
             "Invalid overlay policy did not fail explicitly");
@@ -592,20 +619,22 @@ void run()
                 !icons::validSize(INT32_MAX),
             "Size arithmetic boundary validation failed");
     for (int size : {1, 17, 31, 32, 63, 255, 256, 257}) {
-        load(file, size, icons::Kind::file);
-        load(folder, size, icons::Kind::folder);
+        load(file, size);
+        load(folder, size);
     }
-    reject((fixtures.root / L"missing.txt").u16string(), 256, icons::Kind::file);
-    reject((fixtures.root / L"missing-folder").u16string(), 256, icons::Kind::folder);
-    reject(file.u16string(), 256, icons::Kind::folder);
-    reject(folder.u16string(), 256, icons::Kind::file);
-    reject({}, 256, icons::Kind::file);
-    reject(file.u16string() + std::u16string(u"\0suffix", 7), 256, icons::Kind::file);
-    reject(file.u16string(), 0, icons::Kind::file);
-    reject(file.u16string(), -1, icons::Kind::file);
-    reject(file.u16string(), 32768, icons::Kind::file);
-    reject(file.u16string(), INT32_MAX, icons::Kind::file);
-    reject(file.u16string(), 256, static_cast<icons::Kind>(99));
+    for (const auto& path : {file, folder})
+        for (int size : {32, 256})
+            checkPathRepresentations(path, size);
+    for (const auto& path : {fixtures.root / L"missing.txt",
+                            fixtures.root / L"missing-folder"})
+        for (const auto& suffix : {u"", u"\\", u"/"})
+            reject(path.u16string() + suffix, 256);
+    reject({}, 256);
+    reject(file.u16string() + std::u16string(u"\0suffix", 7), 256);
+    reject(file.u16string(), 0);
+    reject(file.u16string(), -1);
+    reject(file.u16string(), 32768);
+    reject(file.u16string(), INT32_MAX);
 
     // A caller can already own an MTA; extraction must still use its own STA.
     bool mtaPassed = false;
@@ -613,7 +642,7 @@ void run()
     std::thread mta([&] {
         try {
             Apartment apartment(COINIT_MULTITHREADED);
-            load(file, 256, icons::Kind::file);
+            load(file, 256);
             Apartment stillMta(COINIT_MULTITHREADED);
             mtaPassed = true;
         } catch (const std::exception& error) {
@@ -626,19 +655,19 @@ void run()
     {
         Apartment nested(COINIT_APARTMENTTHREADED);
         require(nested.hr == S_FALSE, "Expected already initialized STA");
-        load(folder, 256, icons::Kind::folder);
+        load(folder, 256);
     }
     Apartment stillSta(COINIT_APARTMENTTHREADED);
     require(stillSta.hr == S_FALSE, "Backend uninitialized the caller's COM apartment");
 
     // Default size is supplied by the wrapper; load receives the explicit 256.
-    load(file, 256, icons::Kind::file);
-    load(file, 33, icons::Kind::file);
-    load(folder, 65, icons::Kind::folder);
+    load(file, 256);
+    load(file, 33);
+    load(folder, 65);
     const DWORD handlesBefore = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
     for (int i = 0; i < 32; ++i) {
-        load(file, 33, icons::Kind::file);
-        load(folder, 65, icons::Kind::folder);
+        load(file, 33);
+        load(folder, 65);
     }
     const DWORD handlesAfter = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
     require(handlesBefore == 0 || handlesAfter <= handlesBefore + 4,
@@ -651,22 +680,23 @@ void run()
     const auto custom = customFolder(fixtures.root / L"\u30ab\u30b9\u30bf\u30e0", icon);
     for (int size : {32, 48, 64, 128, 256, 257}) {
         std::cout << "Legacy ICO file size=" << size << '\n';
-        checkFixture(load(icon, size, icons::Kind::file));
+        checkFixture(load(icon, size));
         std::cout << "Legacy ICO folder size=" << size << '\n';
-        checkFixture(load(custom, size, icons::Kind::folder));
+        checkFixture(load(custom, size));
+        checkPathRepresentations(icon, size);
+        checkPathRepresentations(custom, size);
     }
     for (const auto& target : {icon, custom, executable}) {
-        const auto kind = target == custom ? icons::Kind::folder : icons::Kind::file;
-        const auto source = load(target, 32, kind);
+        const auto source = load(target, 32);
         for (int size : {128, 256}) {
-            const auto enlarged = load(target, size, kind);
+            const auto enlarged = load(target, size);
             checkFixture(enlarged);
             checkEnlarged(source, enlarged);
         }
-        require(load(target, 256, kind).rgba ==
-                    load(target, 256, kind, OverlayPolicy::noShortcut).rgba,
+        require(load(target, 256).rgba ==
+                    load(target, 256, OverlayPolicy::noShortcut).rgba,
                 "Suppressing shortcut arrows changed a non-shortcut");
-        checkShellOverlay(target, kind);
+        checkShellOverlay(target);
     }
 
     const auto largeIcon = fixtures.root / L"native-256.ico";
@@ -676,13 +706,13 @@ void run()
         const auto& resource = target == executable ? executable :
             target == largeIcon ? largeIcon : icon;
         shortcut(link, target, resource, target == executable ? -1 : 0);
-        checkShellOverlay(link, icons::Kind::file);
+        checkShellOverlay(link);
         for (int size : {1, 17, 32, 48, 64, 128, 256, 257, 512, 1024}) {
-            const auto plain = load(link, size, icons::Kind::file, OverlayPolicy::noShortcut);
-            const auto decorated = load(link, size, icons::Kind::file);
-            require(load(link, size, icons::Kind::file, OverlayPolicy::none).rgba == plain.rgba,
+            const auto plain = load(link, size, OverlayPolicy::noShortcut);
+            const auto decorated = load(link, size);
+            require(load(link, size, OverlayPolicy::none).rgba == plain.rgba,
                     "No-overlays policy did not remove the shortcut arrow");
-            require(plain.rgba == load(resource, size, icons::Kind::file).rgba,
+            require(plain.rgba == load(resource, size).rgba,
                     "Suppressed shortcut did not preserve its custom icon");
             unsigned changed = 0;
             for (UINT y = 0; y < decorated.height; ++y)
@@ -702,37 +732,48 @@ void run()
             if (size >= 128)
                 checkNativeBadge(plain, decorated, jumboOverlay(link, size));
         }
-        if (target != largeIcon)
-            checkEnlarged(load(link, 32, icons::Kind::file, OverlayPolicy::noShortcut),
-                          load(link, 256, icons::Kind::file, OverlayPolicy::noShortcut));
-    }
-    // A 4D Folder that references a shortcut to a folder ends in a separator.
-    const auto folderLink = fixtures.root / (folder.filename().wstring() + L".lnk");
-    for (const auto& asFolder : {folderLink.u16string(), folderLink.u16string() + u"\\"})
         for (int size : {32, 256})
-            for (auto policy : {OverlayPolicy::system, OverlayPolicy::noShortcut,
-                                OverlayPolicy::none})
-                require(decode(icons::load(asFolder, size, icons::Kind::folder, policy)).rgba ==
-                            load(folderLink, size, icons::Kind::file, policy).rgba,
-                        "Folder shortcut passed as a folder differs from File Get icon");
-    const auto fileLink = fixtures.root / (file.filename().wstring() + L".lnk");
-    reject(fileLink.u16string() + u"\\", 256, icons::Kind::folder);
-    reject(file.u16string() + u"\\", 256, icons::Kind::folder);
+            checkPathRepresentations(link, size);
+        if (target != largeIcon)
+            checkEnlarged(load(link, 32, OverlayPolicy::noShortcut),
+                          load(link, 256, OverlayPolicy::noShortcut));
+    }
+    // A deleted target must not make the caller's File/Folder representation
+    // decide whether an existing shortcut can still use its Shell icon.
     const auto brokenTarget = fixtures.root / L"broken-target";
     require(fs::create_directory(brokenTarget), "Create broken shortcut target failed");
     const auto brokenLink = fixtures.root / L"broken-folder.lnk";
     shortcut(brokenLink, brokenTarget, {});
-    load(brokenLink.u16string() + u"\\", 32, icons::Kind::folder);
-    fs::remove(brokenTarget);
-    reject(brokenLink.u16string() + u"\\", 32, icons::Kind::folder);
-    load(fixtures.root.root_path(), 32, icons::Kind::folder);
+    const auto brokenFileTarget = fixtures.root / L"broken-target.txt";
+    write(brokenFileTarget, {'t', 'e', 's', 't'});
+    const auto brokenFileLink = fixtures.root / L"broken-file.lnk";
+    shortcut(brokenFileLink, brokenFileTarget, icon);
+    const auto customBrokenFolderLink = fixtures.root / L"broken-custom-folder.lnk";
+    shortcut(customBrokenFolderLink, brokenTarget, icon);
+    for (const auto& link : {brokenLink, brokenFileLink, customBrokenFolderLink})
+        for (int size : {32, 256})
+            checkPathRepresentations(link, size);
+    require(fs::remove(brokenTarget) && fs::remove(brokenFileTarget),
+            "Cannot remove broken shortcut targets");
+    for (int size : {32, 256}) {
+        // With no explicit resource, retain whatever success/failure the Shell
+        // supplies for the path without a separator.
+        checkPathRepresentations(brokenLink, size, true);
+        for (const auto& link : {brokenFileLink, customBrokenFolderLink}) {
+            checkPathRepresentations(link, size);
+            require(load(link, size, OverlayPolicy::noShortcut).rgba ==
+                        load(icon, size).rgba,
+                    "Broken shortcut lost its explicit custom icon");
+        }
+    }
+    checkPathRepresentations(fixtures.root.root_path(), 32);
 
     const auto defaultLink = fixtures.root / L"default-executable.lnk";
     shortcut(defaultLink, executable, {});
-    checkEnlarged(load(executable, 32, icons::Kind::file),
-                  load(defaultLink, 256, icons::Kind::file, OverlayPolicy::noShortcut));
-    require(load(defaultLink, 256, icons::Kind::file).rgba !=
-                load(defaultLink, 256, icons::Kind::file, OverlayPolicy::noShortcut).rgba,
+    checkEnlarged(load(executable, 32),
+                  load(defaultLink, 256, OverlayPolicy::noShortcut));
+    require(load(defaultLink, 256).rgba !=
+                load(defaultLink, 256, OverlayPolicy::noShortcut).rgba,
             "Default executable shortcut is missing its arrow");
 
     // MSI advertised shortcuts often reference ICO data named *.exe. The Shell
@@ -741,11 +782,11 @@ void run()
     write(msiIcon, iconFixture());
     const auto msiLink = fixtures.root / L"advertised.lnk";
     shortcut(msiLink, file, msiIcon);
-    const auto msiSource = load(msiLink, 32, icons::Kind::file, OverlayPolicy::noShortcut);
+    const auto msiSource = load(msiLink, 32, OverlayPolicy::noShortcut);
     checkFixture(msiSource);
     for (int size : {128, 256, 512}) {
         std::cout << "MSI style ICO shortcut size=" << size << '\n';
-        const auto enlarged = load(msiLink, size, icons::Kind::file, OverlayPolicy::noShortcut);
+        const auto enlarged = load(msiLink, size, OverlayPolicy::noShortcut);
         checkFixture(enlarged);
         checkEnlarged(msiSource, enlarged);
     }
@@ -759,9 +800,11 @@ void run()
     const auto paddedFolder = customFolder(fixtures.root / L"\u4f59\u767d", paddedIcon);
     for (int size : {256, 257}) {
         std::cout << "Intentionally padded ICO file size=" << size << '\n';
-        checkPaddedFixture(load(paddedIcon, size, icons::Kind::file));
+        checkPaddedFixture(load(paddedIcon, size));
         std::cout << "Intentionally padded ICO folder size=" << size << '\n';
-        checkPaddedFixture(load(paddedFolder, size, icons::Kind::folder));
+        checkPaddedFixture(load(paddedFolder, size));
+        checkPathRepresentations(paddedIcon, size);
+        checkPathRepresentations(paddedFolder, size);
     }
 }
 } // namespace

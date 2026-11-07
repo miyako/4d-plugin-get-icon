@@ -240,10 +240,10 @@ HRESULT binaryCanvas(IWICImagingFactory* wic, const std::wstring& path, int inde
 }
 
 HRESULT iconFileCanvas(IShellItem* item, IWICImagingFactory* wic,
-                       const std::wstring& nativePath, Kind kind, UINT& largest)
+                       const std::wstring& nativePath, bool directory, UINT& largest)
 {
     largest = 0;
-    if (kind == Kind::file && isIconFile(nativePath))
+    if (!directory && isIconFile(nativePath))
         return icoCanvas(wic, nativePath, largest);
     ComPtr<IExtractIconW> location;
     constexpr IID extractIconIID = {0x000214fa, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
@@ -266,7 +266,7 @@ HRESULT iconFileCanvas(IShellItem* item, IWICImagingFactory* wic,
         // Executable handlers can return a cache key rather than a resource
         // index. Recover dimensions from the file or the link's persisted
         // icon location, never interpret that cache key as a resource index.
-        if (kind != Kind::file) return S_FALSE;
+        if (directory) return S_FALSE;
         index = 0;
         if (hasExtension(nativePath, L".lnk")) {
             ComPtr<IShellLinkW> link;
@@ -456,30 +456,6 @@ bool requiresElevation(const std::wstring& path)
     const DWORD written = ExpandEnvironmentStringsW(target.data(), expanded.data(), needed);
     if (!written || written > needed) return false;
     return executableRequiresElevation(expanded.data());
-}
-
-// Reads the persisted target without IShellLink::Resolve, so no UI, search, or
-// link tracking runs; the target must be an existing file system folder.
-bool shortcutTargetsFolder(const std::wstring& path)
-{
-    ComPtr<IShellLinkW> link;
-    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(link.GetAddressOf()))))
-        return false;
-    ComPtr<IPersistFile> persisted;
-    if (FAILED(link.As(&persisted)) || FAILED(persisted->Load(path.c_str(), STGM_READ)))
-        return false;
-    std::vector<wchar_t> target(32768, L'\0');
-    if (link->GetPath(target.data(), static_cast<int>(target.size()), nullptr,
-                      SLGP_RAWPATH) != S_OK || !target[0])
-        return false;
-    const DWORD needed = ExpandEnvironmentStringsW(target.data(), nullptr, 0);
-    if (!needed) return false;
-    std::vector<wchar_t> expanded(needed, L'\0');
-    const DWORD written = ExpandEnvironmentStringsW(target.data(), expanded.data(), needed);
-    if (!written || written > needed) return false;
-    const DWORD attributes = GetFileAttributesW(expanded.data());
-    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
 }
 
 HRESULT shieldIcon(UINT size, Icon& shield)
@@ -775,7 +751,7 @@ Result encode(IWICImagingFactory* wic, HBITMAP handle, UINT size, HICON overlay,
     return result;
 }
 
-Result extract(const std::u16string& path, std::int32_t size, Kind kind, OverlayPolicy overlays)
+Result extract(const std::u16string& path, std::int32_t size, OverlayPolicy overlays)
 {
     Apartment apartment;
     if (apartment.status == RPC_E_CHANGED_MODE)
@@ -785,32 +761,14 @@ Result extract(const std::u16string& path, std::int32_t size, Kind kind, Overlay
 
     static_assert(sizeof(wchar_t) == sizeof(char16_t), "Windows requires UTF-16");
     std::wstring nativePath(path.begin(), path.end());
-    DWORD attributes = GetFileAttributesW(nativePath.c_str());
-    const DWORD attributesError = GetLastError();
-    if (kind == Kind::folder && (attributes == INVALID_FILE_ATTRIBUTES ||
-                                 !(attributes & FILE_ATTRIBUTE_DIRECTORY))) {
-        // 4D Folder paths end in '\', but a shortcut to a folder is a file on
-        // disk. Trim separators (never a drive root) and accept only a .lnk
-        // whose target is an existing folder.
-        std::wstring link = nativePath;
-        while (link.size() > 1 && (link.back() == L'\\' || link.back() == L'/') &&
-               link[link.size() - 2] != L':')
-            link.pop_back();
-        const DWORD linkAttributes = GetFileAttributesW(link.c_str());
-        if (hasExtension(link, L".lnk") && linkAttributes != INVALID_FILE_ATTRIBUTES &&
-            !(linkAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            if (!shortcutTargetsFolder(link))
-                return {{}, "Shortcut target is missing or is not a folder"};
-            // From here the shortcut is extracted exactly like File Get icon.
-            nativePath = std::move(link);
-            attributes = linkAttributes;
-            kind = Kind::file;
-        }
-    }
+    // Folder objects append a separator even when referencing a file or link.
+    while (nativePath.size() > 1 && (nativePath.back() == L'\\' || nativePath.back() == L'/') &&
+           nativePath[nativePath.size() - 2] != L':')
+        nativePath.pop_back();
+    const DWORD attributes = GetFileAttributesW(nativePath.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES)
-        return failure("GetFileAttributesW", HRESULT_FROM_WIN32(attributesError));
-    if (((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != (kind == Kind::folder))
-        return {{}, "Path is not the requested file/folder kind"};
+        return failure("GetFileAttributesW", HRESULT_FROM_WIN32(GetLastError()));
+    const bool directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
     ComPtr<IShellItemImageFactory> imageFactory;
     HRESULT hr = SHCreateItemFromParsingName(nativePath.c_str(), nullptr,
@@ -831,7 +789,7 @@ Result extract(const std::u16string& path, std::int32_t size, Kind kind, Overlay
     hr = imageFactory.As(&item);
     if (FAILED(hr)) return failure("Query Shell item", hr);
     UINT nativeCanvas = 0;
-    hr = iconFileCanvas(item.Get(), wic.Get(), nativePath, kind, nativeCanvas);
+    hr = iconFileCanvas(item.Get(), wic.Get(), nativePath, directory, nativeCanvas);
     if (FAILED(hr)) return failure("Read Shell icon file canvas", hr);
     if (nativeCanvas && nativeCanvas < static_cast<UINT>(size)) {
         // Shell can return an oversized canvas for a legacy icon even without
@@ -856,7 +814,7 @@ Result extract(const std::u16string& path, std::int32_t size, Kind kind, Overlay
     hr = shellOverlay(nativePath, static_cast<UINT>(size), overlays, overlay);
     if (FAILED(hr)) return failure("Read Shell icon overlay", hr);
     Icon shield;
-    if (overlays != OverlayPolicy::none && kind == Kind::file && requiresElevation(nativePath)) {
+    if (overlays != OverlayPolicy::none && !directory && requiresElevation(nativePath)) {
         hr = shieldIcon(std::max<UINT>(1, static_cast<UINT>(size) / 2), shield);
         if (FAILED(hr)) return failure("Read UAC shield icon", hr);
     }
@@ -864,13 +822,11 @@ Result extract(const std::u16string& path, std::int32_t size, Kind kind, Overlay
 }
 } // namespace
 
-Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPolicy overlays)
+Result load(const std::u16string& path, std::int32_t size, OverlayPolicy overlays)
 {
     if (!validSize(size)) return {{}, "Invalid icon size"};
     if (path.empty() || path.find(u'\0') != std::u16string::npos)
         return {{}, "Path must be nonempty and contain no embedded NUL"};
-    if (kind != Kind::file && kind != Kind::folder)
-        return {{}, "Invalid icon kind"};
     if (overlays != OverlayPolicy::system && overlays != OverlayPolicy::noShortcut &&
         overlays != OverlayPolicy::none)
         return {{}, "Invalid icon overlay policy"};
@@ -880,7 +836,7 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPol
         // The caller's COM state (including an existing MTA) is left untouched.
         std::thread worker([&] {
             try {
-                result = extract(path, size, kind, overlays);
+                result = extract(path, size, overlays);
             } catch (const std::bad_alloc&) {
                 result = {{}, "Insufficient memory while extracting icon"};
             } catch (const std::length_error&) {
