@@ -706,6 +706,27 @@ void run()
             checkEnlarged(load(link, 32, icons::Kind::file, OverlayPolicy::noShortcut),
                           load(link, 256, icons::Kind::file, OverlayPolicy::noShortcut));
     }
+    // A 4D Folder that references a shortcut to a folder ends in a separator.
+    const auto folderLink = fixtures.root / (folder.filename().wstring() + L".lnk");
+    for (const auto& asFolder : {folderLink.u16string(), folderLink.u16string() + u"\\"})
+        for (int size : {32, 256})
+            for (auto policy : {OverlayPolicy::system, OverlayPolicy::noShortcut,
+                                OverlayPolicy::none})
+                require(decode(icons::load(asFolder, size, icons::Kind::folder, policy)).rgba ==
+                            load(folderLink, size, icons::Kind::file, policy).rgba,
+                        "Folder shortcut passed as a folder differs from File Get icon");
+    const auto fileLink = fixtures.root / (file.filename().wstring() + L".lnk");
+    reject(fileLink.u16string() + u"\\", 256, icons::Kind::folder);
+    reject(file.u16string() + u"\\", 256, icons::Kind::folder);
+    const auto brokenTarget = fixtures.root / L"broken-target";
+    require(fs::create_directory(brokenTarget), "Create broken shortcut target failed");
+    const auto brokenLink = fixtures.root / L"broken-folder.lnk";
+    shortcut(brokenLink, brokenTarget, {});
+    load(brokenLink.u16string() + u"\\", 32, icons::Kind::folder);
+    fs::remove(brokenTarget);
+    reject(brokenLink.u16string() + u"\\", 32, icons::Kind::folder);
+    load(fixtures.root.root_path(), 32, icons::Kind::folder);
+
     const auto defaultLink = fixtures.root / L"default-executable.lnk";
     shortcut(defaultLink, executable, {});
     checkEnlarged(load(executable, 32, icons::Kind::file),

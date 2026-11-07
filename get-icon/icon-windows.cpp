@@ -458,6 +458,30 @@ bool requiresElevation(const std::wstring& path)
     return executableRequiresElevation(expanded.data());
 }
 
+// Reads the persisted target without IShellLink::Resolve, so no UI, search, or
+// link tracking runs; the target must be an existing file system folder.
+bool shortcutTargetsFolder(const std::wstring& path)
+{
+    ComPtr<IShellLinkW> link;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(link.GetAddressOf()))))
+        return false;
+    ComPtr<IPersistFile> persisted;
+    if (FAILED(link.As(&persisted)) || FAILED(persisted->Load(path.c_str(), STGM_READ)))
+        return false;
+    std::vector<wchar_t> target(32768, L'\0');
+    if (link->GetPath(target.data(), static_cast<int>(target.size()), nullptr,
+                      SLGP_RAWPATH) != S_OK || !target[0])
+        return false;
+    const DWORD needed = ExpandEnvironmentStringsW(target.data(), nullptr, 0);
+    if (!needed) return false;
+    std::vector<wchar_t> expanded(needed, L'\0');
+    const DWORD written = ExpandEnvironmentStringsW(target.data(), expanded.data(), needed);
+    if (!written || written > needed) return false;
+    const DWORD attributes = GetFileAttributesW(expanded.data());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 HRESULT shieldIcon(UINT size, Icon& shield)
 {
     SHSTOCKICONINFO info{};
@@ -760,10 +784,31 @@ Result extract(const std::u16string& path, std::int32_t size, Kind kind, Overlay
         return failure("Initialize shell worker COM apartment", apartment.status);
 
     static_assert(sizeof(wchar_t) == sizeof(char16_t), "Windows requires UTF-16");
-    const std::wstring nativePath(path.begin(), path.end());
-    const DWORD attributes = GetFileAttributesW(nativePath.c_str());
+    std::wstring nativePath(path.begin(), path.end());
+    DWORD attributes = GetFileAttributesW(nativePath.c_str());
+    const DWORD attributesError = GetLastError();
+    if (kind == Kind::folder && (attributes == INVALID_FILE_ATTRIBUTES ||
+                                 !(attributes & FILE_ATTRIBUTE_DIRECTORY))) {
+        // 4D Folder paths end in '\', but a shortcut to a folder is a file on
+        // disk. Trim separators (never a drive root) and accept only a .lnk
+        // whose target is an existing folder.
+        std::wstring link = nativePath;
+        while (link.size() > 1 && (link.back() == L'\\' || link.back() == L'/') &&
+               link[link.size() - 2] != L':')
+            link.pop_back();
+        const DWORD linkAttributes = GetFileAttributesW(link.c_str());
+        if (hasExtension(link, L".lnk") && linkAttributes != INVALID_FILE_ATTRIBUTES &&
+            !(linkAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (!shortcutTargetsFolder(link))
+                return {{}, "Shortcut target is missing or is not a folder"};
+            // From here the shortcut is extracted exactly like File Get icon.
+            nativePath = std::move(link);
+            attributes = linkAttributes;
+            kind = Kind::file;
+        }
+    }
     if (attributes == INVALID_FILE_ATTRIBUTES)
-        return failure("GetFileAttributesW", HRESULT_FROM_WIN32(GetLastError()));
+        return failure("GetFileAttributesW", HRESULT_FROM_WIN32(attributesError));
     if (((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != (kind == Kind::folder))
         return {{}, "Path is not the requested file/folder kind"};
 
