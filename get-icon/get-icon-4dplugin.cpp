@@ -74,73 +74,103 @@ struct Request {
     icons::Kind kind;
     icons::OverlayPolicy overlays;
     icons::Result result;
+    PA_Picture picture = nullptr;
+    bool completed = false;
 };
 
-void nativeLoad(void* context) {
+void createIconPicture(void* context) {
     auto& request = *static_cast<Request*>(context);
     try {
-        request.result = icons::load(request.path, request.size, request.kind,
-                                     request.overlays);
+        if (request.result.error.empty())
+            request.result = icons::load(request.path, request.size, request.kind,
+                                         request.overlays);
     } catch (const std::bad_alloc&) {
         request.result.error = "Out of memory";
     } catch (const std::length_error&) {
         request.result.error = "Image allocation exceeds container limits";
     }
+    if (request.result.png.size() > std::numeric_limits<PA_long32>::max()) {
+        request.result.png.clear();
+        request.result.error = "Encoded PNG exceeds the SDK picture length";
+    }
+    if (request.result) {
+        request.picture = PA_CreatePicture(request.result.png.data(),
+            static_cast<PA_long32>(request.result.png.size()));
+        if (PA_GetLastError() != eER_NoErr || !request.picture) {
+            request.result.error = "4D could not create the PNG picture";
+            if (request.picture)
+                PA_DisposePicture(request.picture);
+            request.picture = nullptr;
+        }
+    }
+    if (!request.picture) {
+        std::fprintf(stderr, "get-icon: %s\n", request.result.error.c_str());
+        request.picture = PA_CreatePicture(nullptr, 0);
+        if (PA_GetLastError() != eER_NoErr || !request.picture) {
+            std::fprintf(stderr, "get-icon: 4D could not create an empty picture\n");
+            if (request.picture)
+                PA_DisposePicture(request.picture);
+            request.picture = nullptr;
+        }
+    }
+    request.completed = true;
+}
+
+#ifdef __APPLE__
+void discardIconPicture(void* context) {
+    auto& request = *static_cast<Request*>(context);
+    PA_DisposePicture(request.picture);
+    if (PA_GetLastError() == eER_NoErr)
+        request.picture = nullptr;
+}
+#endif
+
+void runIconRequest(Request& request) {
+#ifdef __APPLE__
+    // Keep native rendering, SDK picture creation and failure cleanup in one cycle.
+    // Parameter access and ReturnPicture belong to the original caller's context.
+    PA_RunInMainProcess(createIconPicture, &request);
+    if (PA_GetLastError() != eER_NoErr || !request.completed) {
+        std::fprintf(stderr, "get-icon: 4D could not run picture construction in its main process\n");
+        if (request.picture) {
+            PA_RunInMainProcess(discardIconPicture, &request);
+            if (PA_GetLastError() != eER_NoErr || request.picture)
+                std::fprintf(stderr, "get-icon: 4D could not dispose the unreturned picture in its main process\n");
+            request.picture = nullptr;
+        }
+    }
+#else
+    createIconPicture(&request);
+#endif
 }
 
 void getIcon(PA_PluginParameters params, icons::Kind kind) {
     icons::Result result;
+    PA_long32 size = 256;
+    auto overlays = icons::OverlayPolicy::system;
+    std::u16string path;
     try {
         // 4D materializes omitted declared Longint parameters as zero.
-        PA_long32 size = PA_GetLongParameter(params, 2);
+        size = PA_GetLongParameter(params, 2);
         const PA_long32 option = PA_GetLongParameter(params, 3);
-        const auto overlays = option == 1 ? icons::OverlayPolicy::noShortcut :
-                              option == 2 ? icons::OverlayPolicy::none :
-                                            icons::OverlayPolicy::system;
+        overlays = option == 1 ? icons::OverlayPolicy::noShortcut :
+                   option == 2 ? icons::OverlayPolicy::none :
+                                 icons::OverlayPolicy::system;
         if (size == 0)
             size = 256;
-        std::u16string path;
         if (!icons::validSize(size)) {
             result.error = "Size must be positive and its RGBA buffer must fit WIC UINT32_MAX";
         } else if (!objectPath(PA_GetObjectParameter(params, 1), kind, path)) {
             result.error = "Cannot resolve the object's native path";
-        } else {
-            Request request{path, size, kind, overlays,
-                            {{}, "Native icon extraction did not run"}};
-#ifdef __APPLE__
-            // Ask 4D to switch context, never synchronously dispatch onto Cocoa.
-            PA_RunInMainProcess(nativeLoad, &request);
-            if (PA_GetLastError() != eER_NoErr)
-                request.result.error = "4D could not run icon extraction in its main process";
-#else
-            nativeLoad(&request);
-#endif
-            result = std::move(request.result);
         }
     } catch (const std::bad_alloc&) {
         result.error = "Out of memory resolving icon path";
     } catch (const std::length_error&) {
         result.error = "Path exceeds container limits";
     }
-    if (result.png.size() > std::numeric_limits<PA_long32>::max()) {
-        result.png.clear();
-        result.error = "Encoded PNG exceeds the SDK picture length";
-    }
-    PA_Picture picture = nullptr;
-    if (result) {
-        picture = PA_CreatePicture(result.png.data(), static_cast<PA_long32>(result.png.size()));
-        if (PA_GetLastError() != eER_NoErr || !picture) {
-            result.error = "4D could not create the PNG picture";
-            if (picture)
-                PA_DisposePicture(picture);
-            picture = nullptr;
-        }
-    }
-    if (!picture) {
-        std::fprintf(stderr, "get-icon: %s\n", result.error.c_str());
-        picture = PA_CreatePicture(nullptr, 0);
-    }
-    PA_ReturnPicture(params, picture);
+    Request request{path, size, kind, overlays, std::move(result)};
+    runIconRequest(request);
+    PA_ReturnPicture(params, request.picture);
 }
 }
 
