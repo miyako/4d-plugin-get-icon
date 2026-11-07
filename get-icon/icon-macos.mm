@@ -1,8 +1,10 @@
 #include "icon.h"
 #import <AppKit/AppKit.h>
+#import <CoreServices/CoreServices.h>
 #import <ImageIO/ImageIO.h>
 
 #include <algorithm>
+#include <cstring>
 
 namespace icons {
 namespace {
@@ -10,6 +12,25 @@ template<typename T> struct Owned {
     T value;
     ~Owned() { if (value) CFRelease(value); }
 };
+
+bool aliasHasCustomIcon(NSString* path, bool& custom) {
+    // NSURLCustomIconKey is documented as unimplemented; use the native Finder flag.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    FSRef ref;
+    FSCatalogInfo catalog{};
+    OSStatus status = FSPathMakeRef(
+        reinterpret_cast<const UInt8*>(path.fileSystemRepresentation), &ref, nullptr);
+    if (status == noErr)
+        status = FSGetCatalogInfo(&ref, kFSCatInfoFinderInfo, &catalog, nullptr, nullptr, nullptr);
+#pragma clang diagnostic pop
+    if (status != noErr)
+        return false;
+    FileInfo info{};
+    std::memcpy(&info, catalog.finderInfo, sizeof(info));
+    custom = (info.finderFlags & kHasCustomIcon) != 0;
+    return true;
+}
 }
 
 Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPolicy overlays) {
@@ -34,7 +55,8 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPol
         if (![[NSFileManager defaultManager] fileExistsAtPath:file isDirectory:&directory])
             return {{}, "Path is missing or has the wrong file/folder kind"};
         const bool kindMismatch = bool(directory) != (kind == Kind::folder);
-        if (kindMismatch || overlays != OverlayPolicy::system) {
+        NSImage* badge = nil;
+        {
             NSURL* url = [NSURL fileURLWithPath:file];
             NSNumber* alias = nil;
             NSError* error = nil;
@@ -43,6 +65,10 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPol
             if (kindMismatch && (kind != Kind::folder || !alias.boolValue))
                 return {{}, "Path is missing or has the wrong file/folder kind"};
             if (alias.boolValue) {
+                bool custom = false;
+                if (overlays == OverlayPolicy::system &&
+                    !aliasHasCustomIcon(file, custom))
+                    return {{}, "Cannot read Finder alias custom icon metadata"};
                 NSURL* target = [NSURL URLByResolvingAliasFileAtURL:url
                     options:NSURLBookmarkResolutionWithoutUI |
                             NSURLBookmarkResolutionWithoutMounting error:&error];
@@ -52,8 +78,20 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPol
                     (![[NSFileManager defaultManager] fileExistsAtPath:target.path
                         isDirectory:&directory] || !directory))
                     return {{}, "Finder alias target is missing or is not a folder"};
-                if (overlays != OverlayPolicy::system)
+                if (overlays != OverlayPolicy::system || !custom)
                     file = target.path;
+                if (overlays == OverlayPolicy::system && !custom) {
+                    // NSWorkspace can return generic document artwork for an alias.
+                    // Use the target artwork and the OS's full-canvas alias badge.
+                    NSBundle* types = [NSBundle bundleWithPath:
+                        @"/System/Library/CoreServices/CoreTypes.bundle"];
+                    NSString* badgePath = [types pathForResource:@"AliasBadgeIcon" ofType:@"icns"];
+                    if (!badgePath)
+                        return {{}, "Cannot locate the system Finder alias badge"};
+                    badge = [[NSImage alloc] initWithContentsOfFile:badgePath];
+                    if (!badge)
+                        return {{}, "Cannot load the system Finder alias badge"};
+                }
             }
         }
         NSImage* image = [[NSWorkspace sharedWorkspace] iconForFile:file];
@@ -78,6 +116,13 @@ Result load(const std::u16string& path, std::int32_t size, Kind kind, OverlayPol
             scale > 1 ? kCGInterpolationNone : kCGInterpolationHigh);
         CGContextDrawImage(context.value, CGRectMake((size - width * scale) / 2,
             (size - height * scale) / 2, width * scale, height * scale), source);
+        if (badge) {
+            CGImageRef overlay = [badge CGImageForProposedRect:&proposed context:nil hints:nil];
+            if (!overlay || CGImageGetWidth(overlay) == 0 || CGImageGetHeight(overlay) == 0)
+                return {{}, "Cannot obtain Finder alias badge pixels"};
+            CGContextSetInterpolationQuality(context.value, kCGInterpolationHigh);
+            CGContextDrawImage(context.value, CGRectMake(0, 0, size, size), overlay);
+        }
         Owned<CGImageRef> rendered{CGBitmapContextCreateImage(context.value)};
         Owned<CFMutableDataRef> png{CFDataCreateMutable(kCFAllocatorDefault, 0)};
         if (!rendered.value || !png.value)
