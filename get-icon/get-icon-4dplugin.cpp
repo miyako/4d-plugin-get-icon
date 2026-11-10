@@ -53,7 +53,7 @@ bool objectPath(PA_ObjectRef object, std::u16string& path) {
         !readBoolean(object, u"isFolder", folder) || file == folder ||
         !readPath(object, u"platformPath", path))
         return false;
-    Variable argument(PA_CreateVariable(eVK_Unistring));
+    Variable argument(PA_CreateVariable(eVK_Undefined));
     Key ownedPath(path.c_str());
     PA_SetStringVariable(&argument.value, &ownedPath.value);
     // SetStringVariable transfers the string; only the variable may clear it.
